@@ -124,6 +124,22 @@ DS 参数顺序为 `[xi, alpha, fx, fy, cx, cy]`，畸变为 `none`；KB4 为 `p
 
 `CALIBRATION_RESULT PASS` 表示当前求解/误差门禁通过。模型默认保持 `UNDECIDED`，不自动生成唯一权威 `calibration.yaml`；质量通过不等于模型已选择或获准生产使用。
 
+### 板端 raw TCP 原帧入口
+
+板端 `sensor_demo` 可开启 raw 帧服务，按请求返回对应时间戳的紧凑 NV12 原帧（未经 H.264 有损编码，Y 平面即传感器原始亮度）。主机工具通过 `--raw-tcp HOST:PORT` 直连该服务，替代 `--rtsp-url` 作为帧来源；`--camera-id` 必须是 `0`–`3`（或 `cam0`–`cam3`）数值编号。两个来源互斥，只能二选一：
+
+```bash
+robobaton-camera-calibrator \
+  --raw-tcp '<device-address>:<raw-server-port>' \
+  --camera-id cam0 \
+  --target local/target.yaml \
+  --session-config local/session.yaml \
+  --save-data accepted \
+  --output-dir calibration_runs/cam0-raw-session
+```
+
+采集流程、交互命令与求解门禁与 RTSP 入口完全相同；检测和求解都作用在 raw Y 平面上。板端服务每条 TCP 连接只应答一次请求（`LATEST` 取最近帧，`GET` 按 `group_timestamp_ns` 最近邻半帧容差匹配），主机端每帧新建连接请求 `LATEST`。协议详见板端 `docs/raw-frame-server-guide.md`；`terminal.log` 会记录 `raw_tcp` 端点，manifest 的 `source` 标记为 `raw-tcp` 以区分 RTSP 有损亮度。
+
 ## 离线审计与导出
 
 审计不改输入会话或重新优化内参，必须使用采集时的实测板和配置。旧会话没有配置快照时，显式提供原始 YAML。

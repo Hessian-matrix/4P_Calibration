@@ -23,7 +23,7 @@ from robobaton_calibration.aprilgrid import AprilGridDetection, detect_aprilgrid
 from robobaton_calibration.dataset import DatasetWriter
 from robobaton_calibration.diagnostics import diagnose_frame_image, load_diagnostic_target
 from robobaton_calibration.double_sphere import DSParameters
-from robobaton_calibration.frame_source import RTSPFrameSource, redact_url
+from robobaton_calibration.frame_source import RTSPFrameSource, RawTcpFrameSource, redact_url
 from robobaton_calibration.kb4 import KB4Parameters
 from robobaton_calibration.quality import CaptureAssistant, QualityThresholds, classify_frame_quality, select_representative_observations
 from robobaton_calibration.reporting import ModelMetrics, select_model, write_reports
@@ -59,12 +59,40 @@ def _positive_float(text: str) -> float:
     return value
 
 
+def _parse_camera_index(text: str) -> int:
+    """raw TCP 协议需要数值 0..3 相机编号；接受 cam0..cam3 与 0..3。"""
+    normalized = str(text).strip()
+    if normalized.lower().startswith("cam"):
+        normalized = normalized[3:]
+    try:
+        value = int(normalized)
+    except ValueError:
+        raise ValueError(f"camera-id must encode a 0..3 camera index, got {text!r}") from None
+    if not 0 <= value <= 3:
+        raise ValueError(f"camera-id must be 0..3, got {value}")
+    return value
+
+
+def _parse_raw_tcp(text: str) -> Tuple[str, int]:
+    """HOST:PORT 解析只接受 IPv4/主机名与十进制端口，拒绝空主机与越界端口。"""
+    host, sep, port_text = text.rpartition(":")
+    if not sep or not host:
+        raise ValueError(f"raw-tcp must be HOST:PORT, got {text!r}")
+    if not port_text.isdigit():
+        raise ValueError(f"raw-tcp port must be a decimal integer, got {port_text!r}")
+    port = int(port_text)
+    if not 1 <= port <= 65535:
+        raise ValueError(f"raw-tcp port must be 1..65535, got {port}")
+    return host, port
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Robobaton mono8 DS/KB4 intrinsic calibrator")
     parser.add_argument("--version", action="store_true", help="print calibration tool version")
     parser.add_argument("--self-check", action="store_true", help="check host dependencies without creating session output")
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON for self-check or image diagnostics")
     parser.add_argument("--rtsp-url", help="single camera RTSP URL")
+    parser.add_argument("--raw-tcp", help="board raw TCP server address as HOST:PORT; mutually exclusive with --rtsp-url")
     parser.add_argument("--camera-id", default="cam0", help="camera identifier, for example cam0 or 0")
     parser.add_argument("--rig-id", default="robobaton_4p", help="rig identifier written to reports")
     parser.add_argument("--session-config", type=Path, default=CONFIG_DIR / "online_intrinsic_v1.yaml")
@@ -91,11 +119,21 @@ def main(argv: Sequence[str] = None) -> int:
         return _cmd_self_check(args.json)
     if args.diagnose_image:
         return _cmd_diagnose_image(args)
-    if not args.rtsp_url:
-        print("--rtsp-url is required for interactive capture", file=sys.stderr)
+    if args.raw_tcp and args.rtsp_url:
+        print("--raw-tcp and --rtsp-url are mutually exclusive", file=sys.stderr)
         return 2
+    if not args.raw_tcp and not args.rtsp_url:
+        print("--rtsp-url or --raw-tcp is required for interactive capture", file=sys.stderr)
+        return 2
+    if args.raw_tcp:
+        try:
+            _parse_raw_tcp(args.raw_tcp)
+            _parse_camera_index(args.camera_id)
+        except ValueError as exc:
+            print(f"invalid argument: {exc}", file=sys.stderr)
+            return 2
     try:
-        return run_interactive_rtsp_session(args)
+        return run_interactive_session(args)
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"CALIBRATION_RESULT FAIL error={exc}", file=sys.stderr)
         return 1
@@ -527,7 +565,8 @@ def _show_preview_window(window_name: str, overlay: np.ndarray, preview_scale: f
 def _write_terminal_log(output_dir: Path, status: str, source: str, args) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     rtsp_url = redact_url(args.rtsp_url) if getattr(args, "rtsp_url", None) else ""
-    text = f"status={status}\nsource={source}\nrtsp_url={rtsp_url}\ncamera_id={args.camera_id}\n"
+    raw_tcp = getattr(args, "raw_tcp", None) or ""
+    text = f"status={status}\nsource={source}\nrtsp_url={rtsp_url}\nraw_tcp={raw_tcp}\ncamera_id={args.camera_id}\n"
     (output_dir / "terminal.log").write_text(text, encoding="utf-8")
 
 
@@ -560,7 +599,7 @@ def _select_training_and_holdout(
     return train, holdout
 
 
-def run_interactive_rtsp_session(args) -> int:
+def run_interactive_session(args) -> int:
     target = load_target(args.target)
     session_cfg = _load_session_config(args.session_config)
     output_dir = _output_dir(args)
@@ -721,8 +760,15 @@ def run_interactive_rtsp_session(args) -> int:
             status = "PASS" if result.status == "PASS" else "FAIL"
             return True
         return False
+    if args.raw_tcp:
+        host, port = _parse_raw_tcp(args.raw_tcp)
+        source = RawTcpFrameSource(host, port, _parse_camera_index(args.camera_id), DEFAULT_IMAGE_SIZE)
+        source_kind = "raw-tcp"
+    else:
+        source = RTSPFrameSource(args.rtsp_url, DEFAULT_IMAGE_SIZE)
+        source_kind = "rtsp"
     try:
-        with RTSPFrameSource(args.rtsp_url, DEFAULT_IMAGE_SIZE) as source:
+        with source:
             for frame in source.frames():
                 accepted: Optional[bool] = None
                 overlay_reasons: List[str] = []
@@ -853,8 +899,8 @@ def run_interactive_rtsp_session(args) -> int:
                 pass
             finally:
                 _PREVIEW_WINDOW_FRAMES.pop(preview_window_name, None)
-        manifest = writer.finalize(extra={"rig_id": args.rig_id, "camera_id": args.camera_id, "source": "rtsp", "tool_version": __version__, "image_width": DEFAULT_IMAGE_SIZE[0], "image_height": DEFAULT_IMAGE_SIZE[1]})
-        _write_terminal_log(output_dir, status=status, source="rtsp", args=args)
+        manifest = writer.finalize(extra={"rig_id": args.rig_id, "camera_id": args.camera_id, "source": source_kind, "tool_version": __version__, "image_width": DEFAULT_IMAGE_SIZE[0], "image_height": DEFAULT_IMAGE_SIZE[1]})
+        _write_terminal_log(output_dir, status=status, source=source_kind, args=args)
     print(f"CALIBRATION_RESULT {status} output_dir={output_dir} manifest={manifest}")
     return 0 if status == "PASS" else 1
 
