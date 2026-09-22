@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "robobaton-calibration"
+version = "0.1.0"
+description = "RoboBaton 4P host-side DS/KB4 camera intrinsic calibration tools"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.23.5,<2",
+  "scipy>=1.10,<2",
+  "opencv-contrib-python>=4.8,<4.11",
+  "PyYAML>=6,<7",
+  "matplotlib>=3.7,<4",
+]
+
+[project.scripts]
+robobaton-camera-calibrator = "robobaton_calibration.cli:main"
+robobaton-calibration-audit = "robobaton_calibration.audit:main"
+robobaton-calibration-export-kalibr = "robobaton_calibration.export_kalibr:main"
+robobaton-calibration-compare = "robobaton_calibration.compare:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+robobaton_calibration = ["configs/*.yaml", "configs/targets/*.yaml"]

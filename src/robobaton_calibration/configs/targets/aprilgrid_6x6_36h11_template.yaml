@@ -1,0 +1,11 @@
+schema_version: 1
+target_type: aprilgrid
+target_id: TEMPLATE_MEASURE_BEFORE_USE
+measured: false
+rows: 6
+cols: 6
+first_tag_id: 0
+tag_corner_order: [bottom_right, bottom_left, top_left, top_right]
+tag_size_m: null
+tag_spacing_ratio: null
+dictionary: DICT_APRILTAG_36h11
