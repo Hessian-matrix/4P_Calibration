@@ -767,11 +767,13 @@ struct SessionDocument {
 
 fn session_document(root: &Path, journal: Option<&Path>, groups: usize) -> Option<SessionDocument> {
     let journal = journal?;
+    // 产物里的路径一律用 `/`：Windows 上也不写出 `\`，这样同一份导出在任何平台都可比对，
+    // 也和文档/示例里的写法一致（`sessions/s-*/observations.jsonl`）。
     let relative = |path: &Path| {
         path.strip_prefix(root)
             .unwrap_or(path)
             .to_string_lossy()
-            .into_owned()
+            .replace('\\', "/")
     };
     Some(SessionDocument {
         journal: relative(journal),
