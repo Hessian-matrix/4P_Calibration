@@ -327,13 +327,16 @@ fn observability_matches_python_given_same_solution() {
         );
         let want_principal = numbers(&want["principal_stddev_px"]);
         let (cx_sigma, cy_sigma) = report.principal_stddev_px();
+        // 有限差分与协方差求逆会放大跨平台浮点差异，与相邻派生量使用同一容差。
         assert!(
-            (cx_sigma - want_principal[0]).abs() < 1e-9,
-            "{model_name} cx sigma"
+            (cx_sigma - want_principal[0]).abs() / want_principal[0].abs().max(1.0) < 1e-6,
+            "{model_name} cx sigma {cx_sigma} vs {}",
+            want_principal[0]
         );
         assert!(
-            (cy_sigma - want_principal[1]).abs() < 1e-9,
-            "{model_name} cy sigma"
+            (cy_sigma - want_principal[1]).abs() / want_principal[1].abs().max(1.0) < 1e-6,
+            "{model_name} cy sigma {cy_sigma} vs {}",
+            want_principal[1]
         );
         let want_logdet = want["log_det_information"].as_f64().unwrap();
         assert!(

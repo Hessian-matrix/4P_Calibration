@@ -966,19 +966,18 @@ fn publish_result(
     state.message = error.unwrap_or_else(|| format!("完整内外参 V{version} 已发布"));
     let preserve_metrics = complete.is_none() && state.complete_version.is_some();
     for (index, camera) in rig.cameras.iter().enumerate() {
-        if let Some(result) = states.get(&camera.camera_id) {
-            if let Ok(mut tile) = shared.tiles[index].lock() {
-                tile.solve_detail =
-                    format!("诊断 V{version} [{}]：{}", result.status, result.detail);
-                if preserve_metrics {
-                    continue;
-                }
-                tile.metrics = metrics_of(result, thresholds(config));
-                tile.note = format!(
-                    " 指标V{version}/{}张 used={} excl={} holdout={}",
-                    result.views, result.used_views, result.excluded_views, result.holdout_views
-                );
+        if let Some(result) = states.get(&camera.camera_id)
+            && let Ok(mut tile) = shared.tiles[index].lock()
+        {
+            tile.solve_detail = format!("诊断 V{version} [{}]：{}", result.status, result.detail);
+            if preserve_metrics {
+                continue;
             }
+            tile.metrics = metrics_of(result, thresholds(config));
+            tile.note = format!(
+                " 指标V{version}/{}张 used={} excl={} holdout={}",
+                result.views, result.used_views, result.excluded_views, result.holdout_views
+            );
         }
     }
     if preserve_metrics {

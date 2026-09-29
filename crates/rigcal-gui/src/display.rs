@@ -161,10 +161,10 @@ impl Shared {
 
     /// worker 侧：换掉该路待显示帧。返回 `true` = 调用方需要投递一次 UI 通知。
     fn publish(&self, index: usize, frame: SharedPixelBuffer<Rgba8Pixel>) -> bool {
-        if let Ok(mut slots) = self.slots.lock() {
-            if let Some(slot) = slots.get_mut(index) {
-                *slot = Some(frame);
-            }
+        if let Ok(mut slots) = self.slots.lock()
+            && let Some(slot) = slots.get_mut(index)
+        {
+            *slot = Some(frame);
         }
         !self.notify_pending.swap(true, Ordering::SeqCst)
     }

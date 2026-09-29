@@ -434,11 +434,11 @@ fn run(args: &Args) -> Result<std::process::ExitCode, String> {
             let header = format!("rigcal-camera  {}/{}", index + 1, total);
             preview::draw_detection(&mut canvas, &detection, &header)
                 .map_err(|error| error.to_string())?;
-            if let Some(path) = &args.preview_out {
-                if !snapshot_written {
-                    preview::save_snapshot(&canvas, path).map_err(|error| error.to_string())?;
-                    snapshot_written = true;
-                }
+            if let Some(path) = &args.preview_out
+                && !snapshot_written
+            {
+                preview::save_snapshot(&canvas, path).map_err(|error| error.to_string())?;
+                snapshot_written = true;
             }
             if show_preview {
                 let rendered = preview::render_terminal(&canvas, args.render_width)
@@ -642,7 +642,7 @@ fn run_live(
             .advance(&frame, now)
             .map_err(|error| error.to_string())?;
 
-        let show_preview = args.preview_every > 0 && frames_seen % args.preview_every == 0;
+        let show_preview = args.preview_every > 0 && frames_seen.is_multiple_of(args.preview_every);
         if show_preview || (args.preview_out.is_some() && !snapshot_written) {
             let mut canvas = detect::to_canvas(&frame).map_err(|error| error.to_string())?;
             let header = format!(
@@ -653,11 +653,11 @@ fn run_live(
                 preview::draw_detection(&mut canvas, detection, &header)
                     .map_err(|error| error.to_string())?;
             }
-            if let Some(path) = &args.preview_out {
-                if !snapshot_written {
-                    preview::save_snapshot(&canvas, path).map_err(|error| error.to_string())?;
-                    snapshot_written = true;
-                }
+            if let Some(path) = &args.preview_out
+                && !snapshot_written
+            {
+                preview::save_snapshot(&canvas, path).map_err(|error| error.to_string())?;
+                snapshot_written = true;
             }
             if show_preview {
                 let rendered = preview::render_terminal(&canvas, args.render_width)

@@ -161,10 +161,10 @@ fn save_calibration(
     let result = snapshot
         .ok_or_else(|| "尚无完整四路标定结果：各路须成功求解，且 cam0 外参图连通".to_owned())
         .and_then(|snapshot| {
-            if let Some((groups, receipt)) = saved {
-                if *groups == snapshot.groups {
-                    return Ok((snapshot.groups, receipt.clone()));
-                }
+            if let Some((groups, receipt)) = saved
+                && *groups == snapshot.groups
+            {
+                return Ok((snapshot.groups, receipt.clone()));
             }
             export_calibration(
                 Path::new(&config.output.root),
@@ -205,14 +205,14 @@ fn save_calibration(
 }
 
 fn request_clock_calibration(shared: &Shared, camera_index: usize) {
-    if let Some(tile) = shared.tiles.get(camera_index) {
-        if let Ok(mut tile) = tile.lock() {
-            // 失效旧对齐并推进时钟代：在途候选随即作废（pipeline 按代校验）。
-            tile.aligner = None;
-            tile.recalibrate = true;
-            tile.clock_status = ClockStatus::Waiting;
-            tile.clock_revision = tile.clock_revision.wrapping_add(1);
-        }
+    if let Some(tile) = shared.tiles.get(camera_index)
+        && let Ok(mut tile) = tile.lock()
+    {
+        // 失效旧对齐并推进时钟代：在途候选随即作废（pipeline 按代校验）。
+        tile.aligner = None;
+        tile.recalibrate = true;
+        tile.clock_status = ClockStatus::Waiting;
+        tile.clock_revision = tile.clock_revision.wrapping_add(1);
     }
 }
 
@@ -631,10 +631,10 @@ fn guidance_worker(
             };
         }
     }
-    if let Ok(clock_thread) = clock_thread {
-        if clock_thread.join().is_err() {
-            log_line(format!("{camera_id} 时钟采样线程异常退出"));
-        }
+    if let Ok(clock_thread) = clock_thread
+        && clock_thread.join().is_err()
+    {
+        log_line(format!("{camera_id} 时钟采样线程异常退出"));
     }
 }
 

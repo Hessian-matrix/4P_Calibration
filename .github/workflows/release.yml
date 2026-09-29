@@ -94,6 +94,15 @@ jobs:
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
         with:
           arch: x64
+      - name: Pin MSVC linker for Rust
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $linker = Join-Path $env:VCToolsInstallDir 'bin\Hostx64\x64\link.exe'
+          if (-not (Test-Path -LiteralPath $linker -PathType Leaf)) {
+            throw "MSVC linker not found: $linker"
+          }
+          "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$linker" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Pinned Rust toolchain
         run: |
           rustup toolchain install "$RUST_VERSION" --profile minimal --component clippy

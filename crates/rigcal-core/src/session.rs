@@ -399,7 +399,7 @@ impl Session {
         let new_views = self.observations.len().saturating_sub(self.submitted_views);
         // 有未求解的观测，且视图数够（不足时无法求解，仍要返回完整诊断）。
         let pending = new_views > 0 && self.observations.len() >= min_views;
-        if !self.dirty && !(force && pending) {
+        if !(self.dirty || force && pending) {
             return self.cached_outcome();
         }
         let due = pending && (force || new_views >= self.options.cadence || self.solves == 0);

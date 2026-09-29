@@ -93,7 +93,7 @@ impl<'a> DsBundle<'a> {
             .iter()
             .zip(valid)
             .zip(&observation.image_points)
-            .zip(out.chunks_exact_mut(2))
+            .zip(out.as_chunks_mut::<2>().0)
         {
             for axis in 0..2 {
                 let difference = if valid {
@@ -165,7 +165,9 @@ impl LeastSquaresProblem<f64, Dyn, Dyn> for DsBundle<'_> {
                 jacobian[(row, column)] =
                     (plus[offset + index] - minus[offset + index]) / (2.0 * step);
             }
-            if column >= INTRINSIC_PARAMS && (column - INTRINSIC_PARAMS + 1) % POSE_PARAMS == 0 {
+            if column >= INTRINSIC_PARAMS
+                && (column - INTRINSIC_PARAMS + 1).is_multiple_of(POSE_PARAMS)
+            {
                 row_start = end;
             }
             probe[column] = value;
@@ -220,8 +222,10 @@ pub fn solve_ds_intrinsics(
     }
     let parameters = parameters_from_ds(intrinsics_from_unconstrained(result.params.as_slice()));
     let poses: Vec<IntrinsicPose> = result.params.as_slice()[INTRINSIC_PARAMS..]
-        .chunks_exact(POSE_PARAMS)
-        .map(|pose| pose_from_unconstrained(<&[f64; POSE_PARAMS]>::try_from(pose).expect("pose")))
+        .as_chunks::<POSE_PARAMS>()
+        .0
+        .iter()
+        .map(pose_from_unconstrained)
         .collect();
     let evaluation = evaluate_solution(ModelKind::Ds, observations, &parameters, &poses);
     let mut residuals_px = Vec::with_capacity(result.residual_count / 2);

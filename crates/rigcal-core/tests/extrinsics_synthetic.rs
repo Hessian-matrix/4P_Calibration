@@ -235,7 +235,7 @@ fn planted_rig_is_recovered_exactly() {
         rig.rig_rms_px
     );
     println!(
-        "planted rig recovered: rig_rms={:.3e}px cycle={:.3e}°/​{:.3e}mm",
+        "planted rig recovered: rig_rms={:.3e}px cycle={:.3e}°/{:.3e}mm",
         rig.rig_rms_px, cycle.rotation_error_deg, cycle.translation_error_mm
     );
 }
