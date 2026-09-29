@@ -20,9 +20,11 @@ run instead of producing a release without one.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -315,6 +317,15 @@ class RelocatedSmokeTests(unittest.TestCase):
     def test_failing_entry_point_aborts_and_restores_the_sdk(self):
         with self.assertRaises(RuntimeError):
             self.smoke(self.build_archive("exit 1\n"))
+        self.assertTrue((self.vcpkg / "installed").is_dir())
+
+    def test_child_output_survives_a_non_utf8_console(self):
+        # Windows runner 控制台是 cp1252，而两个可执行文件的 --help/--check-deps 是中文：
+        # 直接把捕获到的输出 print 出去会 UnicodeEncodeError，把发布卡在最后一步验证上。
+        args = self.build_archive('printf "汉字输出\n"; exit 0\n')
+        console = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict")
+        with mock.patch.object(sys, "stdout", console), mock.patch.object(release, "ROOT", self.root):
+            release.smoke(args)
         self.assertTrue((self.vcpkg / "installed").is_dir())
 
     def test_build_prefix_leak_is_rejected(self):

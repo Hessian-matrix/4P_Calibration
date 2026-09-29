@@ -654,6 +654,19 @@ def package_release(args):
     (dist / f"SHA256SUMS-{args.label}.txt").write_text(checksums, encoding="utf-8")
 
 
+def emit_captured(text):
+    """Write captured child-process output without dying on a non-UTF-8 console.
+
+    The Windows runner's console is cp1252 while both executables print UTF-8 Chinese in
+    ``--help``/``--check-deps``, so a plain ``print()`` raised UnicodeEncodeError and failed
+    the release at its very last verification step.  Encode to the console's own encoding with
+    replacement, so unrepresentable characters degrade instead of aborting.
+    """
+    encoding = sys.stdout.encoding or "utf-8"
+    sys.stdout.write(text.encode(encoding, "replace").decode(encoding, "replace"))
+    sys.stdout.flush()
+
+
 def smoke(args):
     """Run extracted artifacts after hiding the SDK; nothing may resolve from the build prefix."""
     suffix = ".zip" if os.name == "nt" else ".tar.gz"
@@ -678,7 +691,7 @@ def smoke(args):
                 for argument in ("--help", "--check-deps"):
                     result = subprocess.run([str(program), argument], cwd=temporary, env=environment,
                                             text=True, encoding="utf-8", errors="replace", capture_output=True, timeout=60)
-                    print(result.stdout, result.stderr)
+                    emit_captured(result.stdout + result.stderr)
                     if result.returncode != 0:
                         raise RuntimeError(f"relocated {program.name} {argument} failed: {result.returncode}")
                     if any(path in (result.stdout + result.stderr).lower() for path in excluded):
