@@ -25,6 +25,7 @@ import os
 import shutil
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -449,6 +450,46 @@ class SystemSourcePackagingTests(unittest.TestCase):
         self.assertIn("jammy-security/main", message)
         self.fetch.assert_not_called()
         self.assertEqual(list((self.downloads / "expat").glob("*.dsc")), [])
+
+
+class ArchiveTimestampTests(unittest.TestCase):
+    """A vendored file dated before 1980 must not abort packaging after everything else passed."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="rigcal archive test ")
+        self.addCleanup(temporary.cleanup)
+        self.parent = Path(temporary.name)
+        self.bundle = self.parent / "bundle"
+        self.bundle.mkdir()
+
+    def test_pre_1980_entry_breaks_a_zip_until_normalised(self):
+        stale = self.bundle / "old.txt"
+        stale.write_text("x", encoding="utf-8")
+        os.utime(stale, (0, 0))
+        # 先证明没有这一步就会炸：zipfile 拒绝 1980 之前的时间戳。
+        with self.assertRaises(ValueError):
+            shutil.make_archive(str(self.parent / "before"), "zip", self.bundle.parent, self.bundle.name)
+        release.normalize_archive_timestamps(self.bundle)
+        shutil.make_archive(str(self.parent / "after"), "zip", self.bundle.parent, self.bundle.name)
+        self.assertGreaterEqual(stale.stat().st_mtime, release.ARCHIVE_EPOCH_FLOOR)
+        with zipfile.ZipFile(self.parent / "after.zip") as archive:
+            self.assertIn("bundle/old.txt", archive.namelist())
+
+    def test_current_files_are_left_alone(self):
+        fresh = self.bundle / "fresh.txt"
+        fresh.write_text("x", encoding="utf-8")
+        before = fresh.stat().st_mtime
+        release.normalize_archive_timestamps(self.bundle)
+        self.assertEqual(fresh.stat().st_mtime, before)
+
+    def test_nested_vendored_file_is_reached(self):
+        nested = self.bundle / "LICENSES/rust/crate-1.0"
+        nested.mkdir(parents=True)
+        stale = nested / "LICENSE"
+        stale.write_text("x", encoding="utf-8")
+        os.utime(stale, (0, 0))
+        release.normalize_archive_timestamps(self.bundle)
+        self.assertGreaterEqual(stale.stat().st_mtime, release.ARCHIVE_EPOCH_FLOOR)
 
 
 if __name__ == "__main__":

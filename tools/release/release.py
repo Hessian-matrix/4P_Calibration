@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import tomllib
 import xml.etree.ElementTree as ET
 
@@ -552,6 +553,35 @@ def make_sources(output, vcpkg, packages, system_sources):
             archive.add(system_sources, arcname="native/system-source-archives")
 
 
+#: ZIP 能存储的最早时间：1980-01-01T00:00:00Z（MS-DOS 时间戳的起点）。
+ARCHIVE_EPOCH_FLOOR = 315_532_800
+
+
+def normalize_archive_timestamps(directory):
+    """Raise mtimes that predate the ZIP epoch so archiving cannot fail on a vendored file.
+
+    ``zipfile`` refuses any entry dated before 1980 outright, and one upstream file with a
+    bogus date (some tarballs carry 1970/1979 timestamps) would otherwise abort packaging
+    after the whole bundle is already staged.  Tar has no such limit, so this is a no-op on
+    Linux; the re-dated paths are printed so the offender is visible in the packaging log.
+    """
+    bumped = []
+    for path in sorted(directory.rglob("*")):
+        if not path.is_file():
+            continue
+        mtime = path.stat().st_mtime
+        if mtime < ARCHIVE_EPOCH_FLOOR:
+            os.utime(path, (ARCHIVE_EPOCH_FLOOR, ARCHIVE_EPOCH_FLOOR))
+            stamped = time.strftime("%Y-%m-%d", time.gmtime(mtime))
+            bumped.append(f"{path.relative_to(directory)} ({stamped})")
+    if bumped:
+        print(
+            f"note: {len(bumped)} archived file(s) predate 1980 and were re-dated: "
+            + ", ".join(bumped),
+            flush=True,
+        )
+
+
 def checksum(path):
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
@@ -613,6 +643,7 @@ def package_release(args):
     )
     dist = ROOT / "dist"
     dist.mkdir(exist_ok=True)
+    normalize_archive_timestamps(output)
     source_archive = dist / f"{name}-sources.tar.gz"
     make_sources(source_archive, args.vcpkg, packages, downloads)
     if os.name == "nt":
