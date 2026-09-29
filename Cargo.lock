@@ -3745,7 +3745,7 @@ dependencies = [
 
 [[package]]
 name = "rigcal-camera"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "opencv",
  "rigcal-core",
@@ -3760,7 +3760,7 @@ dependencies = [
 
 [[package]]
 name = "rigcal-core"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "nalgebra",
  "serde",
@@ -3770,7 +3770,7 @@ dependencies = [
 
 [[package]]
 name = "rigcal-ds"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "levenberg-marquardt",
  "nalgebra",
@@ -3783,7 +3783,7 @@ dependencies = [
 
 [[package]]
 name = "rigcal-gui"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "opencv",
  "rigcal-camera",
@@ -3800,7 +3800,7 @@ dependencies = [
 
 [[package]]
 name = "rigcal-io"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "ffmpeg-next",
  "rigcal-core",
@@ -3812,7 +3812,7 @@ dependencies = [
 
 [[package]]
 name = "rigcal-opencv"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "opencv",
  "rigcal-core",

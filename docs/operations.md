@@ -75,8 +75,8 @@ GUI 在两平台都需要桌面环境与可用的 OpenGL 驱动；Linux 支持 X
 git switch feat-4p-calib-rust
 git push origin feat-4p-calib-rust
 # 确认预览构建通过后：
-git tag -a v0.1.0 -m "4P calibration 0.1.0"
-git push origin v0.1.0
+git tag -a v0.0.1 -m "4P calibration 0.0.1"
+git push origin v0.0.1
 ```
 
 三平台全部完成后，工作流核验六个归档的 SHA-256，创建 **Draft Release**，上传三个运行包、三个对应的 `*-sources.tar.gz` 及汇总 `SHA256SUMS.txt`。维护者检查产物和许可后再手动发布；工作流不覆盖已存在的 Release，不自动向 `main` 提交或推送。
@@ -86,8 +86,8 @@ git push origin v0.1.0
 ```bash
 # Linux：在下载目录先校验，再解压对应架构运行包（不是 *-sources.tar.gz）
 sha256sum --check SHA256SUMS.txt --ignore-missing
-tar -xzf rigcal-0.1.0-linux-x86_64.tar.gz
-cd rigcal-0.1.0-linux-x86_64
+tar -xzf rigcal-0.0.1-linux-x86_64.tar.gz
+cd rigcal-0.0.1-linux-x86_64
 ./rigcal-gui --config config/rig.example.yaml
 # 或单相机 CLI
 ./rigcal-camera --config config/camera.example.yaml --live
@@ -95,9 +95,9 @@ cd rigcal-0.1.0-linux-x86_64
 
 ```powershell
 # Windows PowerShell：与 SHA256SUMS.txt 对照，随后解压并进入包目录
-Get-FileHash .\rigcal-0.1.0-windows-x86_64.zip -Algorithm SHA256
-Expand-Archive .\rigcal-0.1.0-windows-x86_64.zip -DestinationPath .
-Set-Location .\rigcal-0.1.0-windows-x86_64
+Get-FileHash .\rigcal-0.0.1-windows-x86_64.zip -Algorithm SHA256
+Expand-Archive .\rigcal-0.0.1-windows-x86_64.zip -DestinationPath .
+Set-Location .\rigcal-0.0.1-windows-x86_64
 .\rigcal-gui.exe --config config/rig.example.yaml
 ```
 
