@@ -57,7 +57,7 @@ target/debug/rigcal-gui --check-deps
 
 | 产物后缀 | 原生构建 Runner | 最低运行环境 |
 |---|---|---|
-| `windows-x86_64.zip` | `windows-2022` | Windows 10/11 x64；包内含 VC++ app-local 运行库 |
+| `windows-x86_64.zip` | `windows-2022` | Windows 10/11 x64；包内含 VC++ app-local 运行库及其 EULA 文本 |
 | `linux-x86_64.tar.gz` | `ubuntu-22.04` | x86_64，glibc ≥2.35 |
 | `linux-aarch64.tar.gz` | `ubuntu-22.04-arm` | ARM64，glibc ≥2.35 |
 
@@ -112,7 +112,7 @@ Set-Location .\rigcal-0.0.1-windows-x86_64
 - 普通源码构建仍自动发现系统库；只有 Release CI 使用 `tools/release/vcpkg.json` 的固定 baseline 与 `triplets/`。当前原生版本为 OpenCV 4.12.0、FFmpeg 9.0.2，动态链接、仅 release，不启用 FFmpeg GPL/nonfree 扩展。Rust 工具链取工作区声明的最低版本，依赖使用 `Cargo.lock`。
 - 每平台执行 `cargo build/test/clippy --locked --release`，测试或告警失败则不发布。打包检查传递依赖、架构、同名冲突和必要的动态加载库；Linux 使用包内相对 RPATH，Windows 使用 app-local DLL。
 - 归档完成后临时隐藏 vcpkg 安装目录、移除其运行时搜索路径，将包解压到另一个**含空格**的目录，并运行两个入口的 `--help` 与 `--check-deps`。这验证启动及依赖加载，不等于已验证 GUI 渲染、真机采集或标定精度。
-- `build-info.json` 记录提交、目标、Rust/vcpkg 版本；`native-dependencies.json` 记录原生库来源。`LICENSES/` 包含原生及 Rust 依赖声明；源码归档包含本项目、解析到的 Rust 依赖、vcpkg 打补丁后的原生源码和构建脚本，以及随包系统库对应的发行版源码。缺少必需源码或版权文件会中止打包。
+- `build-info.json` 记录提交、目标、Rust/vcpkg 版本；Windows 另记 `msvc_runtime`（随包 VC++ 运行库的安装包版本、安装包与 EULA 的 SHA-256）。`native-dependencies.json` 记录原生库来源。`LICENSES/` 包含原生及 Rust 依赖声明；Windows 下由 `VC\Redist\MSVC` 里的 redist 安装包提取 `license.rtf` 到 `LICENSES/msvc/`，并附 `provenance.json`，找不到安装包即中止打包。源码归档包含本项目、解析到的 Rust 依赖、vcpkg 打补丁后的原生源码和构建脚本，以及随包系统库对应的发行版源码。缺少必需源码或版权文件会中止打包。
 - 原生缓存同时保留安装树和对应源码；调整原生依赖或 triplet 会生成新缓存键。不要手工只缓存 DLL／`.so` 而丢弃源码。
 
 **发布许可需要维护者确认**：本项目当前声明 `UNLICENSED`，工作流不会替作者授予分发许可。Slint 有多种许可选择，其 royalty-free desktop 条款不覆盖嵌入式系统；ARM64 产物的存在不代表自动取得嵌入式部署授权。Release 草稿附有 Slint 署名徽章，但徽章不替代许可选择。核对项目、Slint、FFmpeg 等依赖的适用许可后再公开发布。

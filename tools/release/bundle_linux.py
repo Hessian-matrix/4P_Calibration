@@ -46,6 +46,13 @@ Resolution rules
   unset, so resolution has to succeed through the bundle's own relative RPATHs.
   Anything that still lands outside ``lib/`` and is not on the host allowlist is
   a hard failure.
+* Membership in the closure follows from the object carrying an ELF *dynamic
+  section*, not from how many libraries it links.  A shared object with zero
+  ``DT_NEEDED`` entries (Debian/Ubuntu's ``libX11-xcb.so.1.0.0`` is one) is a
+  normal loadable ``ET_DYN`` that simply contributes no further dependencies.
+  The loader reports it as ``statically linked`` -- the very same message it
+  prints for a static executable -- so the two cases are told apart by probing
+  the dynamic section, never by that message.
 
 Failure behaviour
 -----------------
@@ -125,10 +132,11 @@ GPU_VENDOR_DIRS = frozenset({"dri", "DRI", "vdpau"})
 
 # dlopen-only dependencies of the compiled Slint stack.  Evidence:
 #   x11-dl 2.21  src/{xlib,xcursor,xinput2,xlib_xcb}.rs  (winit 0.30 x11 backend)
-#   x11rb 0.13   src/xcb_ffi/raw_ffi/ffi.rs  dl-libxcb -> libxcb.so.1
+#   x11rb 0.13   src/xcb_ffi/raw_ffi/ffi.rs dl-libxcb -> libxcb.so.1
 #   xkbcommon-dl 0.4  src/lib.rs + src/x11.rs
 #   wayland-sys 0.31  src/{client,cursor,egl}.rs  (wayland-backend/dlopen)
 #   glutin 0.32  src/api/egl/mod.rs -> libEGL.so.1, src/api/glx/mod.rs -> libGL.so.1
+#   glutin 0.32  src/platform/x11.rs -> x11-dl::xrender -> libXrender.so.1
 #   (glvnd pulls libGLX.so.0/libGLdispatch.so.0 as *linked* deps of those two, so
 #   they arrive through the ordinary ldd closure.)
 # The femtovg/OpenGL renderer reaches GL only through those dispatch libraries;
@@ -147,6 +155,7 @@ DYNAMIC_SEEDS = (
     ("libwayland-egl.so.1", "wayland-sys egl (glutin wayland EGL surface)", "libwayland-egl1"),
     ("libEGL.so.1", "glutin egl (Slint femtovg renderer)", "libegl1"),
     ("libGL.so.1", "glutin glx (Slint femtovg renderer)", "libgl1"),
+    ("libXrender.so.1", "x11-dl xrender (glutin x11 backend)", "libxrender1"),
 )
 
 REQUIRED_TOOLS = ("ldd", "patchelf", "readelf")
@@ -275,7 +284,14 @@ def format_machine(machine: int) -> str:
     return ELF_MACHINE_NAMES.get(machine, f"e_machine={machine}")
 
 
-def readelf_soname(readelf: str, path: Path, env: dict[str, str]) -> str | None:
+def readelf_dynamic_output(readelf: str, path: Path, env: dict[str, str]) -> str | None:
+    """Return ``readelf -d`` output, or ``None`` when the object has no dynamic section.
+
+    The dynamic section -- not the number of ``DT_NEEDED`` entries -- is what
+    makes an object part of a dynamic closure: a shared object may legitimately
+    link nothing at all while still being a normal, loadable ``ET_DYN`` object.
+    """
+
     result = subprocess.run(
         [readelf, "-d", str(path)],
         capture_output=True,
@@ -290,11 +306,18 @@ def readelf_soname(readelf: str, path: Path, env: dict[str, str]) -> str | None:
             f"readelf -d failed on {path} (exit {result.returncode}): {(result.stderr or result.stdout).strip()}"
         )
     output = f"{result.stdout}\n{result.stderr}"
+    if "There is no dynamic section" in output:
+        return None
+    return output
+
+
+def readelf_soname(readelf: str, path: Path, env: dict[str, str]) -> str | None:
+    output = readelf_dynamic_output(readelf, path, env)
+    if output is None:
+        raise BundleError(f"{path}: no dynamic section, cannot be part of a dynamic closure")
     match = _SONAME_RE.search(output)
     if match is not None:
         return match.group(1)
-    if "There is no dynamic section" in output:
-        raise BundleError(f"{path}: no dynamic section, cannot be part of a dynamic closure")
     return None
 
 
@@ -425,10 +448,18 @@ class LinuxBundler:
             check=False,
         )
         output = f"{result.stdout}\n{result.stderr}"
+        if "not a dynamic executable" in output:
+            raise BundleError(f"{obj} is not a dynamically linked ELF object")
         if result.returncode != 0:
             raise BundleError(f"ldd failed on {obj} (exit {result.returncode}): {output.strip()}")
-        if "not a dynamic executable" in output or "statically linked" in output:
-            raise BundleError(f"{obj} is not a dynamically linked ELF object")
+        if "statically linked" in output:
+            # The loader prints this whenever the object has no DT_NEEDED at all
+            # (glibc elf/rtld.c: ``! main_map->l_info[DT_NEEDED]``), which
+            # includes a shared object that simply links nothing.  Such an
+            # object is a normal closure member with an empty dependency set;
+            # only a missing dynamic section puts it outside a dynamic closure.
+            if readelf_dynamic_output(self.tools["readelf"], obj, self.env) is None:
+                raise BundleError(f"{obj} is not a dynamically linked ELF object")
         return parse_ldd_output(output)
 
     def _resolve_soname(self, name: str) -> Path | None:

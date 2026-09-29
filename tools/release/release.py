@@ -13,6 +13,7 @@ import sys
 import tarfile
 import tempfile
 import tomllib
+import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
@@ -174,6 +175,141 @@ def rust_licenses(destination, target):
     return packages
 
 
+BURN_NAMESPACE = "{http://schemas.microsoft.com/wix/2008/Burn}"
+
+
+def read_burn_license(extracted, installer):
+    """Return ``(license.rtf bytes, redistributable version)`` of an extracted Burn bundle.
+
+    ``0`` is the Burn manifest and ``u<N>`` the embedded payloads.  A bundle also
+    carries one translated copy per language (``1028\\license.rtf`` and friends);
+    only the untranslated payload is the text the bootstrapper shows by default, so
+    it is the notice that accompanies the copied runtime files.  Size and SHA-1 come
+    from the manifest and are re-checked against the payload bytes.
+    """
+    try:
+        manifest = ET.parse(extracted / "0").getroot()
+    except (OSError, ET.ParseError) as error:
+        raise RuntimeError(f"cannot read the Burn manifest of {installer}: {error}") from error
+    payloads = [
+        payload
+        for payload in manifest.findall(f"{BURN_NAMESPACE}UX/{BURN_NAMESPACE}Payload")
+        if payload.get("FilePath", "").lower() == "license.rtf"
+    ]
+    if len(payloads) != 1:
+        raise RuntimeError(
+            f"expected one original MSVC license.rtf in {installer}, found {len(payloads)}"
+        )
+    payload = payloads[0]
+    member = payload.get("SourcePath", "")
+    if not re.fullmatch(r"u[0-9]+", member):
+        raise RuntimeError(f"unexpected MSVC license payload path {member!r} in {installer}")
+    try:
+        data = (extracted / member).read_bytes()
+    except OSError as error:
+        raise RuntimeError(
+            f"cannot read the MSVC license payload {member} of {installer}: {error}"
+        ) from error
+    if not data.startswith(b"{\\rtf"):
+        raise RuntimeError(f"the MSVC license payload of {installer} is not RTF")
+    if (str(len(data)) != payload.get("FileSize")
+            or hashlib.sha1(data).hexdigest().lower() != payload.get("Hash", "").lower()):
+        raise RuntimeError(f"the MSVC license payload of {installer} failed its integrity checks")
+    registration = manifest.find(f"{BURN_NAMESPACE}Registration")
+    if registration is None or not registration.get("Version"):
+        raise RuntimeError(f"the MSVC redistributable version is missing from {installer}")
+    return data, registration.get("Version")
+
+
+def extract_msvc_license(installer, destination):
+    extractor = shutil.which("7z") or shutil.which("7zz")
+    if not extractor:
+        raise RuntimeError("7-Zip is required to extract the MSVC redistribution notice")
+    with tempfile.TemporaryDirectory(prefix="rigcal msvc notice ") as temporary:
+        extracted = Path(temporary)
+        run(extractor, "x", "-y", f"-o{extracted}", installer)
+        data, version = read_burn_license(extracted, installer)
+        destination.mkdir(parents=True, exist_ok=True)
+        license_file = destination / "license.rtf"
+        license_file.write_bytes(data)
+        return {
+            "installer": str(installer.resolve()),
+            "installer_sha256": checksum(installer),
+            "installer_version": version,
+            "license_sha256": checksum(license_file),
+        }
+
+
+def redistributable_installer(root):
+    """The ``vc_redist.x64.exe`` whose ``license.rtf`` is the runtime's notice.
+
+    Visual Studio keeps the versioned redistributable tree under
+    ``VC\\Redist\\MSVC\\<version>`` with the toolset alias (``v143``) beside it, and
+    which of the two holds the standalone installer differs between releases and
+    SKUs.  The fixed locations are tried first, then one bounded recursive sweep of
+    the versioned tree and its parent.  A miss reports every candidate it tried plus
+    what those two directories actually contain, so a layout change is diagnosable
+    from the packaging log alone instead of guessing at another path.
+    """
+    candidates = [root / "vc_redist.x64.exe"]
+    for directory in sorted((root / "x64").glob("Microsoft.VC*.CRT")):
+        toolset = re.fullmatch(r"Microsoft\.VC([0-9]+)\.CRT", directory.name, re.IGNORECASE)
+        if toolset:
+            candidates.append(root.parent / f"v{toolset[1]}" / "vc_redist.x64.exe")
+    candidates.append(root.parent / "vc_redist.x64.exe")
+    if len(root.parents) > 3:
+        # <VS root>\Common7\IDE\VC\vc_redist is the other place VS keeps it.
+        candidates.append(root.parents[3] / "Common7" / "IDE" / "VC" / "vc_redist" / "vc_redist.x64.exe")
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    swept = (root, root.parent)
+    for directory in swept:
+        found = sorted(directory.glob("**/vc_redist.x64.exe"))
+        if found:
+            return found[0]
+    listing = []
+    for directory in (*swept, root / "x64", *candidates):
+        try:
+            listing.append(f"{directory}: {sorted(entry.name for entry in directory.iterdir())}")
+        except OSError as error:
+            listing.append(f"{directory}: {error}")
+    raise FileNotFoundError(
+        "the MSVC redistributable installer (vc_redist.x64.exe) is missing; its license.rtf is "
+        "the redistribution notice of the bundled runtime. Looked for "
+        + ", ".join(str(candidate) for candidate in candidates)
+        + " and recursively under "
+        + ", ".join(str(directory) for directory in swept)
+        + ". Found there: "
+        + " | ".join(listing)
+    )
+
+
+def msvc_licenses(bundle):
+    value = os.environ.get("VCToolsRedistDir")
+    if not value:
+        raise RuntimeError("VCToolsRedistDir is required to collect MSVC notices")
+    root = Path(value).resolve()
+    records = json.loads((bundle / "native-dependencies.json").read_text(encoding="utf-8"))
+    libraries = [record for record in records
+                 if record["bundled"] and record["source"].startswith("vctools-redist:")]
+    if not libraries:
+        raise RuntimeError("no bundled MSVC redistributables recorded; cannot account for their notices")
+    for record in libraries:
+        source = Path(record["source_path"]).resolve()
+        if not source.is_relative_to(root) or not source.is_file():
+            raise RuntimeError(f"MSVC runtime source is outside VCToolsRedistDir or missing: {source}")
+    # VS may keep the installer under the toolset alias (v143), beside the versioned DLL tree.
+    installer = redistributable_installer(root)
+    destination = bundle / "LICENSES" / "msvc"
+    provenance = extract_msvc_license(installer, destination)
+    provenance["redistributable_root"] = str(root)
+    provenance["libraries"] = libraries
+    provenance["redistribution_terms"] = "https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution"
+    (destination / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
+    return provenance
+
+
 def system_licenses_and_sources(bundle, prefix, downloads):
     sources = set()
     records = json.loads((bundle / "native-dependencies.json").read_text(encoding="utf-8"))
@@ -264,10 +400,12 @@ def package_release(args):
     packages = rust_licenses(licenses, target["target"])
     downloads = ROOT / ".release" / "system-sources"
     system_packages = system_licenses_and_sources(output, prefix, downloads) if os.name != "nt" else []
+    msvc = msvc_licenses(output) if os.name == "nt" else None
     build = {
         "version": workspace()["version"], "commit": capture("git", "rev-parse", "HEAD"),
         "target": target["target"], "vcpkg": capture("git", "rev-parse", "HEAD", cwd=args.vcpkg),
         "rustc": capture("rustc", "--version"), "system_sources": system_packages,
+        "msvc_runtime": msvc,
         "minimum_os": "Windows 10 x64; OpenGL driver for GUI" if os.name == "nt" else "Linux glibc >= 2.35; desktop and OpenGL driver for GUI",
     }
     (output / "build-info.json").write_text(json.dumps(build, indent=2) + "\n", encoding="utf-8")
