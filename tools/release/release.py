@@ -726,7 +726,7 @@ def publish(args):
     notes = args.directory / "release-notes.txt"
     notes.write_text(
         "Portable Windows x86_64 and Linux x86_64 / ARM64 packages.\n\n"
-        "Extract the complete runtime archive, edit config/*.example.yaml, and run the GUI or CLI. "
+        "Extract the complete runtime archive, edit config/example.yaml, and run the GUI or CLI. "
         "Linux requires glibc >= 2.35; both platforms need a desktop and OpenGL driver for the GUI. "
         "No Rust, Python, OpenCV or FFmpeg development installation is required.\n\n"
         "SHA256SUMS.txt covers all runtime and corresponding-source archives. "
