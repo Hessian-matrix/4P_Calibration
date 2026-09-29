@@ -27,7 +27,7 @@ use slint::Model;
 use rigcal_camera::detect::Detection;
 use rigcal_camera::live::{self, Gate, GateState};
 use rigcal_core::board::AprilGridConfig;
-use rigcal_core::config::{Config, Guidance, GuidanceSource, RigSection};
+use rigcal_core::config::{Camera, Config, Guidance, GuidanceSource};
 use rigcal_core::session::{SessionState, SessionThresholds};
 use rigcal_io::calibration::{ExportReceipt, export_calibration};
 use rigcal_io::clock::{ClockAligner, PHASE_UNCERTAINTY_LIMIT_NS};
@@ -155,6 +155,7 @@ struct CalibrationSnapshot {
 fn save_calibration(
     snapshot: Option<&CalibrationSnapshot>,
     config: &Config,
+    journal: Option<&Path>,
     shared: &Shared,
     saved: &mut Option<(usize, ExportReceipt)>,
 ) -> Result<(), String> {
@@ -172,6 +173,7 @@ fn save_calibration(
                 &snapshot.states,
                 &snapshot.estimate,
                 snapshot.groups,
+                journal,
             )
             .map(|receipt| (snapshot.groups, receipt))
             .map_err(|error| error.to_string())
@@ -652,22 +654,31 @@ fn parse_rtsp_base(base: &str) -> Result<(String, u16), Box<dyn std::error::Erro
 
 /// 把四路引导源整体切到 RTSP：`camN → rtsp://host:(base_port + N)path`
 fn apply_rtsp_base(
-    rig: &mut RigSection,
+    cameras: &mut [Camera],
     host: &str,
     base_port: u16,
     path: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    for camera in rig.cameras.iter_mut() {
-        let channel = camera
-            .camera_id
-            .strip_prefix("cam")
-            .unwrap_or(&camera.camera_id);
-        let channel = channel
-            .parse::<u16>()
-            .map_err(|error| format!("相机编号 {}: {error}", camera.camera_id))?;
+    for camera in cameras.iter_mut() {
+        let channel = u16::try_from(camera.channel())
+            .map_err(|error| format!("相机编号 {}: {error}", camera.id))?;
+        let port = base_port
+            .checked_add(channel)
+            .ok_or_else(|| format!("相机编号 {}: 端口 {} 溢出", camera.id, base_port))?;
         camera.guidance = GuidanceSource::Rtsp {
-            url: format!("rtsp://{host}:{}{path}", base_port + channel),
+            url: format!("rtsp://{host}:{port}{path}"),
         };
+    }
+    Ok(())
+}
+
+/// GUI 只驱动多路 rig：单相机配置在这里明确拒绝（与 `rigcal-camera` 拒绝多路对称）。
+fn require_two_cameras(config: &Config) -> Result<(), String> {
+    if config.cameras.len() < 2 {
+        return Err(format!(
+            "rigcal-gui 需要至少两路 cameras（当前 {} 路）；单相机请用 rigcal-camera",
+            config.cameras.len()
+        ));
     }
     Ok(())
 }
@@ -736,11 +747,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                      rigcal-gui --replay-observations <observations.jsonl> [--out <目录>]\n  \
                      rigcal-gui --check-deps\n\n\
                      选项:\n  \
-                     --config <yaml>       四路配置（rig 段：cameras + evidence + 图约束）\n  \
-                     --rtsp-base <host[:port]>\n                        把四路引导源整体切到 RTSP：\n                        \
+                     --config <yaml>       多路配置（cameras ≥2 + evidence + extrinsics 图约束）\n  \
+                     --rtsp-base <host[:port]>\n                        把各路引导源整体切到 RTSP：\n                        \
                      camN → rtsp://host:(port+N)path（默认 port=554）\n  \
                      --rtsp-path <path>    RTSP 路径（默认 /PRR）\n  \
-                     --evidence <host:port>\n                        覆盖证据帧服务端点（默认取配置里 rig.evidence）\n  \
+                     --evidence <host:port>\n                        覆盖证据帧服务端点（默认取配置里 evidence）\n  \
                      --max-groups <n>      抓满 n 组后停止采集并导出；窗口保留（0/缺省 = 一直跑）\n  \
                      --run-seconds <s>     跑 s 秒后自动退出（无人值守验证用）\n  \
                      --log <file>          诊断日志（默认 <output.root>/gui.log）\n  \
@@ -786,35 +797,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(base) = &rtsp_base {
         let (host, base_port) = parse_rtsp_base(base)?;
         let path = rtsp_path.clone().unwrap_or_else(|| "/PRR".to_owned());
-        let Some(rig) = config.rig.as_mut() else {
-            return Err("--rtsp-base 需要配置里的 rig 段".into());
-        };
-        apply_rtsp_base(rig, &host, base_port, &path)?;
+        apply_rtsp_base(&mut config.cameras, &host, base_port, &path)?;
         if evidence_override.is_none() {
             // 证据服务与相机同机：换 host，并把端口切到**板端实际端口**（30432）。
             // 端口以板端 `~/demo/config/sensor_config.yaml` 的 `raw_server.port` 为准，
             // 实际端点写入日志；可用 `--evidence host:port` 覆盖。
-            rig.evidence.host = host;
-            rig.evidence.port = FIELD_RAW_PORT;
+            let evidence = config.evidence.as_mut().ok_or(
+                "--rtsp-base 需要配置里的 evidence 段（板端 raw 服务端点），不按缺省静默新建",
+            )?;
+            evidence.host = host;
+            evidence.port = FIELD_RAW_PORT;
         }
     }
     if let Some(evidence) = &evidence_override {
         let (host, port) = evidence
             .split_once(':')
             .ok_or("--evidence 需要 host:port")?;
-        let Some(rig) = config.rig.as_mut() else {
-            return Err("--evidence 需要配置里的 rig 段".into());
-        };
-        rig.evidence.host = host.to_owned();
-        rig.evidence.port = port
+        let target = config.evidence.as_mut().ok_or(
+            "--evidence 需要配置里的 evidence 段（板端 raw 服务端点），不按缺省静默新建",
+        )?;
+        target.host = host.to_owned();
+        target.port = port
             .parse::<u16>()
             .map_err(|error| format!("--evidence 端口: {error}"))?;
     }
     config.validate()?;
-    let rig = config
-        .rig
-        .clone()
-        .ok_or("rigcal-gui 需要配置里的 rig 段（四路：cameras + evidence + 图约束）")?;
+    require_two_cameras(&config)?;
+    let evidence = config.evidence.clone().ok_or(
+        "rigcal-gui 需要配置里的 evidence 段（板端 raw 服务：多路帧组由它按同一时刻取）",
+    )?;
     let image_size = config.image_size();
     {
         let default_log = PathBuf::from(&config.output.root).join("gui.log");
@@ -827,22 +838,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             config_path.display(),
             path.display()
         ));
-        for camera in &rig.cameras {
+        for camera in &config.cameras {
             let source = match &camera.guidance {
                 GuidanceSource::Rtsp { url } => format!("rtsp {url}"),
                 GuidanceSource::Video { path } => format!("video {path}"),
             };
-            log_line(format!("  引导 {} ← {source}", camera.camera_id));
+            log_line(format!("  引导 {} ← {source}", camera.id));
         }
-        log_line(format!(
-            "  证据 raw-tcp://{}:{}",
-            rig.evidence.host, rig.evidence.port
-        ));
+        log_line(format!("  证据 raw-tcp://{}:{}", evidence.host, evidence.port));
     }
     log_line(dependency_info);
 
     let mut tiles = Vec::new();
-    for _ in &rig.cameras {
+    for _ in &config.cameras {
         tiles.push(Mutex::new(TileState {
             status: "WAITING".to_owned(),
             ..TileState::default()
@@ -855,8 +863,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             message: "等待第一组证据帧".to_owned(),
             hint: format!(
                 "证据端点 raw-tcp://{}:{}；门禁：检测 {}→{} Hz，新颖度 ×{:.1}，冷却 {:.1}s",
-                rig.evidence.host,
-                rig.evidence.port,
+                evidence.host,
+                evidence.port,
                 config.guidance.detect_hz,
                 config.guidance.detect_hz_max,
                 config.guidance.trigger_novelty_scale,
@@ -880,7 +888,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut overlays: Vec<Arc<Mutex<Option<Arc<Detection>>>>> = Vec::new();
     let mut sources: Vec<FrameSource> = Vec::new();
     let mut failed: Vec<bool> = Vec::new();
-    for (index, camera) in rig.cameras.iter().enumerate() {
+    for (index, camera) in config.cameras.iter().enumerate() {
         let (locator, pace) = match &camera.guidance {
             GuidanceSource::Rtsp { url } => (url.clone(), false),
             GuidanceSource::Video { path } => (path.clone(), true),
@@ -897,7 +905,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 log_line(format!(
                     "{} 引导源启动失败（fail-closed，无回退）：{error}",
-                    camera.camera_id
+                    camera.id
                 ));
                 slots.push(Arc::new(FrameSlot::new()));
                 failed.push(true);
@@ -917,26 +925,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let guidance = config.guidance.clone();
     let quality = quality_thresholds(&config);
     let mut workers = Vec::new();
-    for (index, camera) in rig.cameras.iter().enumerate() {
+    for (index, camera) in config.cameras.iter().enumerate() {
         if failed[index] {
             continue;
         }
-        let raw_camera = camera
-            .raw_camera_id
-            .unwrap_or_else(|| camera.camera_id[3..].parse().unwrap_or(0))
-            as i32;
+        let raw_camera = camera.channel() as i32;
         let handle = std::thread::Builder::new()
-            .name(format!("guide-{}", camera.camera_id))
+            .name(format!("guide-{}", camera.id))
             .spawn({
                 let shared = Arc::clone(&shared);
                 let stop = Arc::clone(&stop);
                 let slot = Arc::clone(&slots[index]);
                 let overlay = Arc::clone(&overlays[index]);
                 let candidates = Arc::clone(&pipeline.candidates);
-                let camera_id = camera.camera_id.clone();
+                let camera_id = camera.id.clone();
                 let guidance = guidance.clone();
                 let board = board.clone();
-                let raw = (rig.evidence.host.clone(), rig.evidence.port, raw_camera);
+                let raw = (evidence.host.clone(), evidence.port, raw_camera);
                 move || {
                     guidance_worker(
                         GuidanceJob {
@@ -1169,10 +1174,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_rtsp_base, parse_rtsp_base};
+    use super::{apply_rtsp_base, parse_rtsp_base, require_two_cameras};
     use rigcal_core::config::{Config, GuidanceSource};
 
-    const CONFIG: &str = include_str!("../example.rig.yaml");
+    const CONFIG: &str = include_str!("../example.yaml");
 
     #[test]
     fn rtsp_base_parses_host_with_and_without_port() {
@@ -1190,9 +1195,8 @@ mod tests {
     #[test]
     fn rtsp_base_rewrites_every_camera_like_python_does() {
         let mut config = Config::from_yaml(CONFIG).expect("example config must parse");
-        let rig = config.rig.as_mut().expect("rig section");
-        apply_rtsp_base(rig, "10.21.12.162", 554, "/PRR").expect("apply");
-        let urls: Vec<String> = rig
+        apply_rtsp_base(&mut config.cameras, "10.21.12.162", 554, "/PRR").expect("apply");
+        let urls: Vec<String> = config
             .cameras
             .iter()
             .map(|camera| match &camera.guidance {
@@ -1214,5 +1218,19 @@ mod tests {
         config
             .validate()
             .expect("overridden config must stay valid");
+    }
+
+    #[test]
+    fn single_camera_config_is_rejected_with_the_pipeline_hint() {
+        let mut config = Config::from_yaml(CONFIG).expect("example config must parse");
+        config.cameras.truncate(1);
+        config.extrinsics = None;
+        // 单相机文件本身合法（`rigcal-camera` 用的就是它）；拒绝必须来自 GUI 这一侧。
+        config.validate().expect("1 路配置合法");
+        let error = require_two_cameras(&config).expect_err("GUI 必须拒绝单相机配置");
+        assert!(
+            error.contains("至少两路") && error.contains("rigcal-camera"),
+            "错误必须指明路数与去向：{error}"
+        );
     }
 }

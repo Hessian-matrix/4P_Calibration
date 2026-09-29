@@ -19,6 +19,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = "2"
+# 导出目录名用本地日期时间（人能直接读），因此需要一台时钟与本地时区。
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 ffmpeg-next = { version = "=9.0.0", default-features = false, features = ["codec", "format", "software-scaling"] }
 
 [[bin]]

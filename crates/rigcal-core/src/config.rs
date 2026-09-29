@@ -1,44 +1,68 @@
-//! 单一配置文件的 schema 与校验（单相机内参产线）。
+//! 单一配置文件的 schema 与校验（单相机内参与四路 rig 共用一套）。
 //!
-//! **精简原则**：只保留「会改变标定结果或门禁」的项。采集覆盖/审计类门槛（`capture_min_*`、
-//! `audit_*`、`audit_grid_*`、`capture_*_bucket_frames` 等）服务的是交互式覆盖引导与离线审计，
-//! 不在此 schema；需要时按同一 schema 加回即可，不影响求解语义。
+//! **一份文件、一种写法**：`cameras` 列出参与标定的相机（1 路 = 单相机产线，≥2 路 = 四路 rig），
+//! 引导源逐路给，证据服务全局一个。没有「模式」二选一，也没有 `device`/`capture` 这类只在某一种
+//! 模式下才写的段落——同一台设备的配置在单相机与四路之间只是 `cameras` 的长度不同。
 //!
-//! 未知键一律拒绝（`deny_unknown_fields`）：静默忽略会让人以为「配了门禁」，实际没生效。
+//! **精简原则**：只保留「会改变标定结果或门禁」的项。未知键一律拒绝
+//! （`deny_unknown_fields`）：静默忽略会让人以为「配了门禁」，实际没生效。
+//!
+//! 外参约束与门禁只对多路有意义，因此 `extrinsics` 段**仅** ≥2 路时允许：单相机文件里出现它
+//! 直接报错，而不是静默忽略。
 
 use serde::{Deserialize, Serialize};
 
 use crate::board::{AprilGridConfig, Corner};
 use crate::models::ModelKind;
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub schema_version: u32,
-    pub device: Device,
-    /// 单相机：引导源 + 证据源（与 `rig` 二选一）。
+    /// 设备/工装标识：单相机与四路用同一个字段，写入产物用于追溯。
+    pub rig_id: String,
+    /// `[width, height]`，像素；引导、证据与配置必须一致。
+    pub image_size: [u32; 2],
+    /// 参与标定的相机：1 路 = 单相机产线，≥2 路 = 四路 rig。
+    pub cameras: Vec<Camera>,
+    /// 证据帧来源（板端 raw 服务）。≥2 路必填；单相机离线回放可省略。
     #[serde(default)]
-    pub capture: Option<Capture>,
-    /// 多路 rig：逐路引导源 + 共享证据源 + 图约束（与 `capture` 二选一）。
+    pub evidence: Option<EvidenceSource>,
+    /// 外参图约束与门禁；仅 ≥2 路允许。
     #[serde(default)]
-    pub rig: Option<RigSection>,
+    pub extrinsics: Option<Extrinsics>,
     pub board: BoardSection,
     pub guidance: Guidance,
     pub solver: Solver,
     pub output: Output,
 }
 
-/// 多路 rig：四目预览/标定的输入面。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RigSection {
-    pub rig_id: String,
-    /// 各路：`camera_id` 形如 `camN`（N 也是板端 raw 的通道号），带自己的引导源。
-    pub cameras: Vec<RigCamera>,
-    /// 证据帧来源（所有路共用一个 raw 端点，取"帧组"）。
-    pub evidence: EvidenceSource,
+pub struct Camera {
+    /// `camN`：N 同时是板端 raw 的默认通道号。
+    pub id: String,
+    /// 引导帧源（RTSP / 本地视频）：只用于单帧质量、检测与预览，不产生标定输入。
+    pub guidance: GuidanceSource,
+    /// 板端 raw 服务的通道号；缺省取 `id` 里的 N（重编号/演练时可显式覆盖）。
+    #[serde(default)]
+    pub channel: Option<u32>,
+}
+
+impl Camera {
+    /// 该相机在板端 raw 服务上的通道号：显式 `channel` 优先，否则取 `camN` 的 N。
+    pub fn channel(&self) -> u32 {
+        self.channel
+            .unwrap_or_else(|| self.id[3..].parse().unwrap_or(0))
+    }
+}
+
+/// 多路 rig 的外参图约束与门禁。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Extrinsics {
     /// 必须成立的外参边（无向）；默认相邻链 `cam0-cam1, cam1-cam2, cam2-cam3`。
     #[serde(default = "default_required_edges")]
     pub required_edges: Vec<[String; 2]>,
@@ -51,16 +75,6 @@ pub struct RigSection {
     pub max_edge_rms_px: f64,
     pub max_cycle_rotation_deg: f64,
     pub max_cycle_translation_mm: f64,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RigCamera {
-    pub camera_id: String,
-    pub guidance: GuidanceSource,
-    /// 板端 raw 服务的通道号（`camN` 的 N；显式给出便于用 mock/重编号演练）。
-    #[serde(default)]
-    pub raw_camera_id: Option<u32>,
 }
 
 fn default_required_edges() -> Vec<[String; 2]> {
@@ -86,24 +100,9 @@ fn default_min_groups_per_edge() -> usize {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Device {
-    /// 单相机配置必填；多路 rig 配置用 `rig.rig_id`。
-    #[serde(default)]
-    pub camera_id: String,
-    #[serde(default)]
-    pub rig_id: Option<String>,
-    /// `[width, height]`，像素。
-    pub image_size: [u32; 2],
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Capture {
-    /// 引导帧源（RTSP / 本地视频）：只用于单帧质量、检测与预览，不产生标定输入。
-    pub guidance: GuidanceSource,
-    /// 证据帧源（板端 raw 服务）：标定输入的唯一来源。离线目录回放时留空。
-    #[serde(default)]
-    pub evidence: Option<EvidenceSource>,
+pub struct EvidenceSource {
+    pub host: String,
+    pub port: u16,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -113,16 +112,6 @@ pub enum GuidanceSource {
     Rtsp { url: String },
     /// 本地视频/容器文件：与 RTSP 走**同一条解码路径**（离线回放用）。
     Video { path: String },
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct EvidenceSource {
-    pub host: String,
-    pub port: u16,
-    /// 板端 raw 服务的相机编号。
-    #[serde(default)]
-    pub camera: u32,
 }
 
 /// 引导门禁参数。
@@ -250,130 +239,131 @@ impl Config {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.schema_version != SCHEMA_VERSION {
             return Err(invalid(format!(
-                "schema_version must be {SCHEMA_VERSION}, got {}",
+                "schema_version must be {SCHEMA_VERSION}, got {} \
+                 (v1 的 device/capture/rig 写法已合并为 rig_id/image_size/cameras/extrinsics)",
                 self.schema_version
             )));
         }
-        match (&self.capture, &self.rig) {
-            (Some(_), Some(_)) => {
+        if self.rig_id.is_empty() {
+            return Err(invalid("rig_id must not be empty"));
+        }
+        if self.image_size[0] == 0 || self.image_size[1] == 0 {
+            return Err(invalid(
+                "image_size must be [width, height] with positive values",
+            ));
+        }
+        if self.cameras.is_empty() {
+            return Err(invalid(
+                "cameras must list the participating cameras (1 = 单相机, >=2 = 四路 rig)",
+            ));
+        }
+        let mut seen_ids: Vec<&str> = Vec::new();
+        let mut seen_channels: Vec<u32> = Vec::new();
+        for camera in &self.cameras {
+            if !camera.id.starts_with("cam") || camera.id[3..].parse::<usize>().is_err() {
+                return Err(invalid(format!(
+                    "cameras.id must look like camN, got {}",
+                    camera.id
+                )));
+            }
+            if seen_ids.contains(&camera.id.as_str()) {
+                return Err(invalid(format!("cameras repeats {}", camera.id)));
+            }
+            seen_ids.push(camera.id.as_str());
+            let channel = camera.channel();
+            if seen_channels.contains(&channel) {
+                return Err(invalid(format!(
+                    "cameras repeats raw channel {channel} ({} and an earlier camera)",
+                    camera.id
+                )));
+            }
+            seen_channels.push(channel);
+            match &camera.guidance {
+                GuidanceSource::Rtsp { url } if url.is_empty() => {
+                    return Err(invalid(format!("cameras[{}].guidance.url must not be empty", camera.id)));
+                }
+                GuidanceSource::Video { path } if path.is_empty() => {
+                    return Err(invalid(format!("cameras[{}].guidance.path must not be empty", camera.id)));
+                }
+                _ => {}
+            }
+        }
+        if let Some(evidence) = &self.evidence {
+            if evidence.host.is_empty() {
+                return Err(invalid("evidence.host must not be empty"));
+            }
+            if evidence.port == 0 {
                 return Err(invalid(
-                    "capture 与 rig 是两种模式，只能给一个：单相机用 capture，多路用 rig",
+                    "evidence.port must be the board raw frame service port",
                 ));
             }
-            (None, None) => {
+        }
+        match (&self.extrinsics, self.cameras.len()) {
+            (None, 1) => {}
+            (None, count) => {
+                return Err(invalid(format!(
+                    "{count} 路需要 extrinsics 段（required_edges / required_cycles / 外参门禁）"
+                )));
+            }
+            (Some(_), 1) => {
                 return Err(invalid(
-                    "缺少取图配置：单相机写 capture（guidance + evidence），多路写 rig（cameras + evidence）",
+                    "extrinsics 段只对 ≥2 路有意义；单相机请删除它",
                 ));
             }
-            (Some(_), None) => {
-                if self.device.camera_id.is_empty() {
-                    return Err(invalid("device.camera_id must not be empty"));
+            (Some(extrinsics), _) => {
+                if self.evidence.is_none() {
+                    return Err(invalid(
+                        "≥2 路需要 evidence（板端 raw 服务）：帧组由它按同一时刻取四路",
+                    ));
                 }
-            }
-            (None, Some(rig)) => {
-                if rig.rig_id.is_empty() {
-                    return Err(invalid("rig.rig_id must not be empty"));
-                }
-                if rig.cameras.len() < 2 {
-                    return Err(invalid("rig.cameras must list at least two cameras"));
-                }
-                let mut seen_ids: Vec<&str> = Vec::new();
-                let mut seen_channels: Vec<u32> = Vec::new();
-                for camera in &rig.cameras {
-                    if camera.camera_id.is_empty()
-                        || !camera.camera_id.starts_with("cam")
-                        || camera.camera_id[3..].parse::<usize>().is_err()
-                    {
-                        return Err(invalid(format!(
-                            "rig.cameras camera_id must look like camN, got {}",
-                            camera.camera_id
-                        )));
-                    }
-                    if seen_ids.contains(&camera.camera_id.as_str()) {
-                        return Err(invalid(format!("rig.cameras repeats {}", camera.camera_id)));
-                    }
-                    seen_ids.push(camera.camera_id.as_str());
-                    if let Some(channel) = camera.raw_camera_id {
-                        if seen_channels.contains(&channel) {
-                            return Err(invalid(format!(
-                                "rig.cameras repeats raw_camera_id {channel}"
-                            )));
-                        }
-                        seen_channels.push(channel);
-                    }
-                    match &camera.guidance {
-                        GuidanceSource::Rtsp { url } if url.is_empty() => {
-                            return Err(invalid("rig.cameras.guidance.url must not be empty"));
-                        }
-                        GuidanceSource::Video { path } if path.is_empty() => {
-                            return Err(invalid("rig.cameras.guidance.path must not be empty"));
-                        }
-                        _ => {}
-                    }
-                }
-                for edge in &rig.required_edges {
+                for edge in &extrinsics.required_edges {
                     for camera_id in edge {
                         if !seen_ids.contains(&camera_id.as_str()) {
                             return Err(invalid(format!(
-                                "rig.required_edges references unknown camera {camera_id}"
+                                "extrinsics.required_edges references unknown camera {camera_id}"
                             )));
                         }
                     }
                     if edge[0] == edge[1] {
-                        return Err(invalid("rig.required_edges must join two distinct cameras"));
+                        return Err(invalid(
+                            "extrinsics.required_edges must join two distinct cameras",
+                        ));
                     }
                 }
-                for cycle in &rig.required_cycles {
+                for cycle in &extrinsics.required_cycles {
                     if cycle.len() < 3 {
                         return Err(invalid(
-                            "rig.required_cycles must list at least three cameras",
+                            "extrinsics.required_cycles must list at least three cameras",
                         ));
                     }
                     for camera_id in cycle {
                         if !seen_ids.contains(&camera_id.as_str()) {
                             return Err(invalid(format!(
-                                "rig.required_cycles references unknown camera {camera_id}"
+                                "extrinsics.required_cycles references unknown camera {camera_id}"
                             )));
                         }
                     }
                 }
-                if rig.min_groups_per_edge == 0 {
-                    return Err(invalid("rig.min_groups_per_edge must be positive"));
+                if extrinsics.min_groups_per_edge == 0 {
+                    return Err(invalid("extrinsics.min_groups_per_edge must be positive"));
                 }
                 for (name, value) in [
-                    ("rig.max_edge_rms_px", rig.max_edge_rms_px),
-                    ("rig.max_cycle_rotation_deg", rig.max_cycle_rotation_deg),
-                    ("rig.max_cycle_translation_mm", rig.max_cycle_translation_mm),
+                    (
+                        "extrinsics.max_edge_rms_px",
+                        extrinsics.max_edge_rms_px,
+                    ),
+                    (
+                        "extrinsics.max_cycle_rotation_deg",
+                        extrinsics.max_cycle_rotation_deg,
+                    ),
+                    (
+                        "extrinsics.max_cycle_translation_mm",
+                        extrinsics.max_cycle_translation_mm,
+                    ),
                 ] {
                     if !value.is_finite() || value <= 0.0 {
                         return Err(invalid(format!("{name} must be positive")));
                     }
-                }
-            }
-        }
-        if self.device.image_size[0] == 0 || self.device.image_size[1] == 0 {
-            return Err(invalid(
-                "device.image_size must be [width, height] with positive values",
-            ));
-        }
-        if let Some(capture) = &self.capture {
-            match &capture.guidance {
-                GuidanceSource::Rtsp { url } if url.is_empty() => {
-                    return Err(invalid("capture.guidance.url must not be empty"));
-                }
-                GuidanceSource::Video { path } if path.is_empty() => {
-                    return Err(invalid("capture.guidance.path must not be empty"));
-                }
-                _ => {}
-            }
-            if let Some(evidence) = &capture.evidence {
-                if evidence.host.is_empty() {
-                    return Err(invalid("capture.evidence.host must not be empty"));
-                }
-                if evidence.port == 0 {
-                    return Err(invalid(
-                        "capture.evidence.port must be the board raw frame service port",
-                    ));
                 }
             }
         }
@@ -520,6 +510,6 @@ impl Config {
     }
 
     pub fn image_size(&self) -> (u32, u32) {
-        (self.device.image_size[0], self.device.image_size[1])
+        (self.image_size[0], self.image_size[1])
     }
 }

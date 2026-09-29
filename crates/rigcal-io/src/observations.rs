@@ -239,19 +239,9 @@ pub fn read_observations(path: &Path) -> Result<(Config, Vec<RecordedGroup>), Jo
     Ok((config, groups))
 }
 
-/// 配置允许出现的相机集合：优先 `rig.cameras`，否则退到单相机 `device.camera_id`。
+/// 配置允许出现的相机集合：就是 `cameras` 列出的那些。
 fn allowed_cameras(config: &Config) -> BTreeSet<String> {
-    match &config.rig {
-        Some(rig) => rig
-            .cameras
-            .iter()
-            .map(|camera| camera.camera_id.clone())
-            .collect(),
-        None if !config.device.camera_id.is_empty() => {
-            BTreeSet::from([config.device.camera_id.clone()])
-        }
-        None => BTreeSet::new(),
-    }
+    config.cameras.iter().map(|camera| camera.id.clone()).collect()
 }
 
 /// 组级校验：版本/组身份单调、非空、相机唯一且属于配置、角点非空等长有限。

@@ -14,9 +14,7 @@ use rigcal_io::observations::{
 fn camera_lines(count: usize) -> String {
     (0..count)
         .map(|index| {
-            format!(
-                "    - {{camera_id: cam{index}, guidance: {{type: video, path: /tmp/cam{index}.mp4}}, raw_camera_id: {index}}}"
-            )
+            format!("  - {{id: cam{index}, guidance: {{type: video, path: /tmp/cam{index}.mp4}}}}")
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -24,10 +22,19 @@ fn camera_lines(count: usize) -> String {
 
 fn four_camera_config() -> Config {
     let yaml = format!(
-        r#"schema_version: 1
-device:
-  rig_id: test_rig
-  image_size: [1280, 1088]
+        r#"schema_version: 2
+rig_id: test_rig
+image_size: [1280, 1088]
+cameras:
+{cameras}
+evidence: {{host: 127.0.0.1, port: 4211}}
+extrinsics:
+  required_edges: [[cam0, cam1], [cam1, cam2], [cam2, cam3]]
+  required_cycles: [[cam0, cam1, cam2, cam3]]
+  min_groups_per_edge: 3
+  max_edge_rms_px: 1.0
+  max_cycle_rotation_deg: 1.0
+  max_cycle_translation_mm: 10.0
 board:
   target_type: aprilgrid
   target_id: test_board
@@ -60,17 +67,6 @@ solver:
     min_focus_score: 500.0
     min_contrast: 20.0
     max_saturated_fraction: 0.35
-rig:
-  rig_id: test_rig
-  cameras:
-{cameras}
-  evidence: {{host: 127.0.0.1, port: 4211}}
-  required_edges: [[cam0, cam1], [cam1, cam2], [cam2, cam3]]
-  required_cycles: [[cam0, cam1, cam2, cam3]]
-  min_groups_per_edge: 3
-  max_edge_rms_px: 1.0
-  max_cycle_rotation_deg: 1.0
-  max_cycle_translation_mm: 10.0
 output:
   root: calibration_runs/test
 "#,

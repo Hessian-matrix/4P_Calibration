@@ -20,6 +20,7 @@
 //!   `has_current_solution` 只认「覆盖当前全部观测且评估一致、采纳成功」的解——采纳失败
 //!   或新增观测都不得沿用旧 holdout 冒充本版。
 
+use crate::config::Config;
 use crate::estimator::{Observation, estimate_fixed_intrinsics_pose};
 use crate::estimator::{SolveBackend, SolveOutcome, SolveRequest};
 use crate::models::{ModelKind, Parameters};
@@ -61,6 +62,20 @@ impl Default for SessionThresholds {
             max_holdout_rms_px: 1.0,
             max_holdout_p95_px: 1.0,
             window: 3,
+        }
+    }
+}
+
+impl SessionThresholds {
+    /// 生效阈值 = 配置里可调的部分 + 代码默认的其余判据。
+    ///
+    /// 单相机产线、四路 GUI 与导出各自需要这份数值；这里是**唯一**的映射点，
+    /// 避免三处各写一遍、日后改动只改了其中一处。
+    pub fn from_config(config: &Config) -> Self {
+        Self {
+            max_holdout_rms_px: config.solver.max_holdout_rms_px,
+            max_holdout_p95_px: config.solver.max_holdout_p95_px,
+            ..Self::default()
         }
     }
 }

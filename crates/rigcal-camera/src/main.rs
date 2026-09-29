@@ -26,15 +26,6 @@ use rigcal_io::rtsp::FrameSource;
 use rigcal_opencv::quality::{QualityThresholds, classify_frame_quality};
 use serde::Serialize;
 
-/// 会话阈值：默认值 + 配置里的 holdout 门禁两项。
-fn session_thresholds(config: &Config) -> SessionThresholds {
-    SessionThresholds {
-        max_holdout_rms_px: config.solver.max_holdout_rms_px,
-        max_holdout_p95_px: config.solver.max_holdout_p95_px,
-        ..SessionThresholds::default()
-    }
-}
-
 /// 采集质量门禁阈值（配置 `solver.quality`）。
 fn quality_thresholds(config: &Config) -> QualityThresholds {
     QualityThresholds {
@@ -52,7 +43,7 @@ rigcal-camera —— 单相机内参产线（Rust，会话循环）
   rigcal-camera --config <single-file.yaml> --live [--out <dir>] [选项]          # 在线：RTSP + 板端 raw
   rigcal-camera --check-deps                                               # 依赖版本与链接记录
 
-在线模式（--live）用配置里的 `capture.guidance`（RTSP / 本地视频）做引导，用 `capture.evidence`
+在线模式（--live）用配置里 `cameras[0].guidance`（RTSP / 本地视频）做引导，用 `evidence`
 （板端 raw 服务）取证据帧；触发判据见 guidance 段。
 
 选项:
@@ -480,7 +471,7 @@ fn run(args: &Args) -> Result<std::process::ExitCode, String> {
     }
 
     // ---- 阶段 2：每个模型跑一遍会话循环（求解 → 分析 → 直到收敛 goal）----
-    let thresholds = session_thresholds(&config);
+    let thresholds = SessionThresholds::from_config(&config);
     let models_dir = args.out.join("models");
     std::fs::create_dir_all(&models_dir)
         .map_err(|error| format!("cannot create {}: {error}", models_dir.display()))?;
@@ -532,21 +523,26 @@ fn run_live(
     board: &AprilGridConfig,
 ) -> Result<std::process::ExitCode, String> {
     let image_size = config.image_size();
-    let capture = config
-        .capture
-        .as_ref()
-        .ok_or("--live 需要 capture 段（单相机：guidance + evidence）；四路配置请用 rigcal-gui")?;
-    let (locator, label) = match &capture.guidance {
+    let camera = match config.cameras.as_slice() {
+        [camera] => camera,
+        cameras => {
+            return Err(format!(
+                "rigcal-camera 只处理单相机配置：cameras 必须恰好一路（当前 {} 路）；四路请用 rigcal-gui",
+                cameras.len()
+            ));
+        }
+    };
+    let (locator, label) = match &camera.guidance {
         GuidanceSource::Rtsp { url } => (url.clone(), format!("rtsp {url}")),
         GuidanceSource::Video { path } => (path.clone(), format!("video {path}")),
     };
-    let evidence = capture
+    let evidence = config
         .evidence
         .as_ref()
-        .ok_or("在线模式需要 capture.evidence（板端 raw 服务）；离线回放请用 --frames")?;
+        .ok_or("在线模式需要 evidence（板端 raw 服务）；离线回放请用 --frames")?;
 
     // 文件源按流帧率节流：让它像在线源一样按真实节奏出帧（门禁与冷却都是 wall-clock 判据）。
-    let pace = matches!(capture.guidance, GuidanceSource::Video { .. });
+    let pace = matches!(camera.guidance, GuidanceSource::Video { .. });
     let mut source = FrameSource::start(&locator, image_size, Duration::from_secs(10), pace)
         .map_err(|error| error.to_string())?;
     let slot = source.slot();
@@ -558,7 +554,7 @@ fn run_live(
     let mut raw = RawTcpFrameSource::new(
         &evidence.host,
         evidence.port,
-        evidence.camera as i32,
+        camera.channel() as i32,
         image_size,
         5.0,
     )
@@ -570,7 +566,7 @@ fn run_live(
         quality_thresholds(config),
     )
     .map_err(|error| error.to_string())?;
-    let thresholds = session_thresholds(config);
+    let thresholds = SessionThresholds::from_config(config);
     let mut runners: Vec<ModelRunner> = config
         .solver
         .models

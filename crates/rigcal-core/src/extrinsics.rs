@@ -546,7 +546,7 @@ pub fn solve_rig(
 ///
 /// **确定性**：邻接表用 `BTreeMap`，邻居按相机 id 字典序遍历。真机机架常带轻微不一致的闭环
 /// （边各自独立求解），此时「先到先得」的 BFS 结果取决于遍历顺序；`HashMap` 的迭代顺序跨
-/// 进程/线程不稳定，会让同一次标定在两次运行里得到不同的 `T_ci_c0`，进而让 calibration.yaml
+/// 进程/线程不稳定，会让同一次标定在两次运行里得到不同的 `T_ci_c0`，进而让 extrinsics.yaml
 /// 与 camchain.yaml 互相矛盾。按 id 排序给出唯一的**最短路径 + 字典序打平**结果。
 pub fn reference_transforms(
     rig: &RigEstimate,

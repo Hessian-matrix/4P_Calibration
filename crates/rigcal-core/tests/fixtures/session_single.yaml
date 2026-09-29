@@ -1,15 +1,14 @@
-schema_version: 1
-device:
-  camera_id: cam0
-  image_size: [1280, 1088]
-capture:
-  guidance:
-    type: rtsp
-    url: rtsp://10.21.12.162:554/PRR
-  evidence:
-    host: 10.21.12.162
-    port: 4200
-    camera: 0
+schema_version: 2
+rig_id: cam0_single
+image_size: [1280, 1088]
+cameras:
+  - id: cam0
+    guidance:
+      type: rtsp
+      url: rtsp://10.21.12.162:554/PRR
+evidence:
+  host: 10.21.12.162
+  port: 4200
 board:
   target_type: aprilgrid
   target_id: robobaton_4p_6x6_36h11

@@ -90,9 +90,9 @@ git push origin v0.0.1
 sha256sum --check SHA256SUMS.txt --ignore-missing
 tar -xzf rigcal-0.0.1-linux-x86_64.tar.gz
 cd rigcal-0.0.1-linux-x86_64
-./rigcal-gui --config config/rig.example.yaml
+./rigcal-gui --config config/example.yaml
 # 或单相机 CLI
-./rigcal-camera --config config/camera.example.yaml --live
+./rigcal-camera --config config/example.yaml --live
 ```
 
 ```powershell
@@ -100,7 +100,7 @@ cd rigcal-0.0.1-linux-x86_64
 Get-FileHash .\rigcal-0.0.1-windows-x86_64.zip -Algorithm SHA256
 Expand-Archive .\rigcal-0.0.1-windows-x86_64.zip -DestinationPath .
 Set-Location .\rigcal-0.0.1-windows-x86_64
-.\rigcal-gui.exe --config config/rig.example.yaml
+.\rigcal-gui.exe --config config/example.yaml
 ```
 
 先按实际设备核对 `config/` 示例中的 IP、raw 端口、画布尺寸与标定板实测几何。示例默认设备 `10.21.12.162`、raw `30432`；**示例不证明你的板尺寸或设备配置正确**。完整保留 EXE/DLL 或 Linux `lib/`，不要只拷贝单个可执行文件。原生 KB4/DS 不依赖 Python；发布包不带显式可选的 SciPy 对拍后端。
@@ -134,42 +134,33 @@ make drill-check
 
 ## 3. 配置
 
-两种模式**二选一**（同时给出会被拒绝）：
-
-### 3.1 单相机（`capture`）
+**一个文件、一套 schema**（`schema_version: 2`）：`cameras` 列几路就是几路——1 路 = 单相机产线（`rigcal-camera`），≥2 路 = 四路 rig（`rigcal-gui`）。示例：`crates/rigcal-gui/example.yaml`。
 
 ```yaml
-device: {camera_id: cam0, image_size: [1280, 1088]}
-capture:
-  guidance: {type: rtsp, url: "rtsp://10.21.12.162:554/PRR"}   # 或 type: video, path: …
-  evidence: {host: 10.21.12.162, port: 30432, camera: 0}
-board: {…}          # AprilGrid 内联参数，measured: true 才允许标定
-guidance: {…}       # 门禁：detect_hz / detect_hz_max / jitter_* / trigger_*；质量阈值在 solver.quality
-solver: {…}         # models / min_observations / max_solve_observations / holdout_* / quality
-output: {root: calibration_runs}
-```
-
-### 3.2 四路 rig（`rig`）
-
-```yaml
-device: {rig_id: robobaton_4p, image_size: [1280, 1088]}
-rig:
-  cameras:
-    - {camera_id: cam0, guidance: {type: rtsp, url: "…:554/PRR"}, raw_camera_id: 0}
-    # cam1..cam3 同理（:555/:556/:557）
-  evidence: {host: 10.21.12.162, port: 30432}
+schema_version: 2
+rig_id: robobaton_4p                       # 单相机也写：产物用它追溯
+image_size: [1280, 1088]
+cameras:                                   # 1..N；id 形如 camN，N 即板端 raw 的默认通道号
+  - {id: cam0, guidance: {type: rtsp, url: "rtsp://10.21.12.162:554/PRR"}}
+  - {id: cam1, guidance: {type: rtsp, url: "rtsp://10.21.12.162:555/PRR"}}
+  - {id: cam2, guidance: {type: video, path: /tmp/guide_cam2.mp4}, channel: 2}   # channel 可省，缺省取 N
+evidence: {host: 10.21.12.162, port: 30432}   # 板端 raw 服务；≥2 路必填，单相机离线可省
+extrinsics:                                # 仅 ≥2 路允许；单相机文件里出现即报错
   required_edges: [[cam0, cam1], [cam1, cam2], [cam2, cam3], [cam3, cam0]]
   required_cycles: [[cam0, cam1, cam2, cam3]]
   min_groups_per_edge: 3
   max_edge_rms_px: 1.0
   max_cycle_rotation_deg: 1.0
   max_cycle_translation_mm: 10.0
-board/guidance/solver/output: 同上
+board: {…}          # AprilGrid 内联参数，measured: true 才允许标定
+guidance: {…}       # 采集门禁：detect_hz / detect_hz_max / jitter_* / trigger_*；质量阈值在 solver.quality
+solver: {…}         # models / min_observations / max_solve_observations / holdout_* / quality
+output: {root: calibration_runs}
 ```
 
-未知键、越界值、互相矛盾的组合在加载期拒绝。清晰度使用 `solver.quality.min_focus_score`（Tenengrad，初值 500）。
+未知键、越界值与互相矛盾的组合同样在加载期拒绝。`device` / `capture` / `rig` 是 v1 的旧写法（已合并为上面的段落），出现即报错；单相机文件多写 `extrinsics`、多路文件缺 `extrinsics` 或缺 `evidence`、两路 `channel` 重复、`id` 不是 `camN` 都直接拒绝。清晰度使用 `solver.quality.min_focus_score`（Tenengrad，初值 500）。
 
-### 3.3 四路运行链路
+### 3.1 四路运行链路
 
 - 同组 `group_id`、组时间戳一致作为设备的**同步曝光约定**，不是主机重新测得的逐路曝光时刻。
 - 显示独占线程：最新灰度帧先缩到 480 px 宽，再叠加最近检测结果、转 RGBA；叠加允许落后，不参与触发帧身份判定。
@@ -213,7 +204,7 @@ cp /tmp/guide_cam0.mp4 /tmp/guide_cam2.mp4
 cp /tmp/guide_cam0.mp4 /tmp/guide_cam3.mp4
 
 # ④ 配置里的 evidence 指向 127.0.0.1:4211
-cargo run -p rigcal-gui -- --config crates/rigcal-gui/example.rig.yaml --max-groups 32
+cargo run -p rigcal-gui -- --config crates/rigcal-gui/example.yaml --max-groups 32
 ```
 
 演练帧可从标定板录像抽帧；合成板必须使用配置指定的字典与打印几何。
@@ -308,25 +299,38 @@ DS 的轴心角度斜率为 `fx/(1+xi)`，不能直接把 DS 原始 `fx` 与 KB4
 2. 证据端点：`--evidence host:port`（不给就用配置里的）。
 3. 尺寸：引导、证据、配置三者必须一致（1280×1088），不一致会 fail closed 并打印实际尺寸。
 
-## 8. 四路标定结果导出
+## 8. 标定结果导出
 
 右栏 `结束采集并全量精修导出` 停止接收新候选，排空在途取组与审核，然后对最新前缀执行全量精修。达到 `--max-groups`、正常关窗或定时结束也走同一路径。
 在线 `max_solve_observations` 仅限制实时优化代表子集；最终 `Session::refine()` 使用全部可用训练观测，holdout 不回流。四路解、连通外参和必需环均完整才导出；不完整或精修失败明确报错，绝不把旧在线结果冒充最终结果。质量阈值不变。
 写盘仍归独立导出线程；到上限后窗口继续显示，采集停止。同版关闭复用已写目录。最终求解/写盘失败可从完整角点日志离线重放；重放也失败则非零退出，不静默降级。
 
-产物位于 `<output.root>/exports/run-<时间戳>/`，每次新快照使用独立目录，不覆盖旧结果：
+产物位于 `<output.root>/exports/run-<本地日期时间>/`（如 `run-20260929-153012`），每次新快照使用独立目录，不覆盖旧结果。**结果是结果，上下文是上下文**：
 
-| 文件 | 内容与坐标约定 |
-|---|---|
-| `calibration.yaml` | `cam0..cam3` 的模型、带名称的内参向量、分辨率、质量指标，以及四个 `T_c0_ci`；满足 `P_c0 = T_c0_ci * P_ci`，cam0 为单位阵，平移单位 **m** |
-| `camchain.yaml` | Kalibr 格式；KB4 为 `pinhole/equidistant`，DS 为 `ds/none`；相邻变换 `T_cn_cnm1` 满足 `P_cn = T_cn_cnm1 * P_cnm1`，**不是** `T_c0_ci` |
+| 文件 | 类别 | 内容与坐标约定 |
+|---|---|---|
+| `cam0.yaml` … `cam3.yaml` | 结果 | 每路一个文件：`camera_id`、`model`、`resolution`、`parameter_names`、`parameters`。只有参数值——不含误差、统计或判定 |
+| `extrinsics.yaml` | 结果 | 四路外参在同一文件：`cameras.<id>.T_c0_ci`，满足 `P_c0 = T_c0_ci * P_ci`，cam0 逐位精确单位阵，平移单位 **m** |
+| `info.yaml` | 信息 | 来源（会话与配置路径、相机与证据端点）、板几何、**有效阈值**（配置值 + 代码默认值合并后的实际数值）、观测量指标（重投影 rms、秩、条件数、留出、边与环）、判定 |
+| `camchain.yaml` | 交换 | Kalibr 格式；KB4 为 `pinhole/equidistant`，DS 为 `ds/none`；`T_cn_cnm1` 满足 `P_cn = T_cn_cnm1 * P_cnm1`，**不是** `T_c0_ci`。派生自同目录结果，头注释指向 `info.yaml` |
 
-- `VALIDATED`：四路内参收敛，且配置要求的边/环质量门禁全部通过。
-- `DRAFT`：几何结果完整，但还有质量门禁未通过；主文件的 `warnings` 与 camchain 注释明确列出原因，不能当作验收合格。
+判定只写在 `info.yaml` 的 `judgement` 里，并且机器可复核：
+
+```yaml
+judgement:
+  status: VALIDATED | DRAFT
+  warnings: ['cam0-cam1: edge_groups 2.0000 < 3.0000']   # 人读，与未通过的检查一一对应
+  checks:                                                # 机读：阈值 × 指标
+    - {scope: cam0, metric: rms_px, value: 0.187, limit: 0.2, bound: at_most, passed: true}
+    - {scope: cam0-cam1, metric: edge_groups, value: 5.0, limit: 3.0, bound: at_least, passed: true}
+```
+
+- `VALIDATED`：四路内参收敛，且每条检查通过（`checks` 全 `passed: true`、`warnings` 为空）。
+- `DRAFT`：几何结果完整，但有检查未通过；每条未通过的检查都能在 `warnings` 找到对应的一条，不能当作验收合格。
 - 缺相机、模型不一致、无效参数/刚体矩阵、缺必需边/环或图不连通：拒绝导出。
-- 两个文件写入同一临时目录、同步后原子发布目录；失败时清理临时目录，已有导出不受影响。
+- 全部文件先写入同一临时目录、同步后原子发布；失败时清理临时目录，已有导出不受影响。
 
-先看 `status` 和 `warnings`，再使用参数。`求解成功`、`导出成功`、`质量验收通过` 是三件不同的事。
+先看 `judgement.status` 与 `checks`，再用结果文件。`求解成功`、`导出成功`、`质量验收通过` 是三件不同的事。
 
 ### 8.1 完整观测留存与离线重算
 

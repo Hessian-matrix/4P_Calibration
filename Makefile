@@ -37,10 +37,10 @@ fmt:
 	$(CARGO) fmt
 
 gui:
-	$(CARGO) run -p rigcal-gui -- --config crates/rigcal-gui/example.rig.yaml
+	$(CARGO) run -p rigcal-gui -- --config crates/rigcal-gui/example.yaml
 
 gui-online:
-	$(CARGO) run -p rigcal-gui -- --config crates/rigcal-gui/example.rig.yaml --rtsp-base 10.21.12.162
+	$(CARGO) run -p rigcal-gui -- --config crates/rigcal-gui/example.yaml --rtsp-base 10.21.12.162
 
 camera-offline:
 	@test -n "$(FRAMES)" || (echo "用法: make camera-offline FRAMES=<图片目录> OUT=<输出目录>"; exit 2)

@@ -21,7 +21,7 @@ local/              现场配置（gitignored）：camera_session.yaml 等
 
 GitHub Actions 的 `Portable release` 为 **Windows x86_64、Linux x86_64、Linux ARM64（aarch64）** 构建带原生运行库的压缩包。功能分支推送产出预览 artifacts；与工作区版本一致的 `v*` 标签在三平台全部通过后创建 **Release 草稿**。
 
-解压完整目录后，修改 `config/*.example.yaml` 即可运行，不需要安装 Rust、Python 或 OpenCV／FFmpeg 开发包。Linux 要求 glibc ≥2.35；GUI 需要桌面环境与 OpenGL 驱动。下载、校验、启动与发布步骤见 [发布流程](docs/operations.md#14-跨平台发布包与-release-流程)。
+解压完整目录后，修改 `config/example.yaml` 即可运行，不需要安装 Rust、Python 或 OpenCV／FFmpeg 开发包。Linux 要求 glibc ≥2.35；GUI 需要桌面环境与 OpenGL 驱动。下载、校验、启动与发布步骤见 [发布流程](docs/operations.md#14-跨平台发布包与-release-流程)。
 
 ## 构建
 
@@ -46,8 +46,8 @@ cargo clippy --all-targets -- -D warnings
 
 | 场景 | 命令 |
 |---|---|
-| 四路仪表盘（真机） | `cargo run -p rigcal-gui -- --config crates/rigcal-gui/example.rig.yaml --rtsp-base 10.21.12.162` |
-| 四路仪表盘（无相机演练） | `make drills-mock FRAMES=<.pgm 帧目录>` + `cargo run -p rigcal-gui -- --config crates/rigcal-gui/example.rig.yaml` |
+| 四路仪表盘（真机） | `cargo run -p rigcal-gui -- --config crates/rigcal-gui/example.yaml --rtsp-base 10.21.12.162` |
+| 四路仪表盘（无相机演练） | `make drills-mock FRAMES=<.pgm 帧目录>` + `cargo run -p rigcal-gui -- --config crates/rigcal-gui/example.yaml` |
 | 四路观测离线重算 | `cargo run -p rigcal-gui -- --replay-observations <会话目录>/observations.jsonl --out <输出目录>` |
 | 单相机离线回放 | `cargo run -p rigcal-camera --bin rigcal-camera -- --config local/camera_session.yaml --frames <图片目录> --out <输出目录>` |
 | 单相机在线 | `cargo run -p rigcal-camera --bin rigcal-camera -- --config local/camera_session.yaml --live --out <输出目录>` |
@@ -59,8 +59,8 @@ GUI 没有控制台，诊断写日志（默认 `<output.root>/gui.log`），**�
 `已采 / 已算 / 完整 / 算中` 版本、触发/拒绝/取组失败、对齐状态与红色错误行。
 
 四路结果通过右栏 `结束采集并全量精修导出` 保存；关窗或采满上限也先精修最新前缀，再导出，不沿用旧在线解。
-产物在 `<output.root>/exports/run-*/{calibration,camchain}.yaml`；质量未达标明确标为 `DRAFT`。
-坐标约定与失败边界见 [运行手册 §8](docs/operations.md#8-四路标定结果导出)。
+产物在 `<output.root>/exports/run-<本地日期时间>/`：每路一个内参文件、四路外参一个文件、`info.yaml`（来源/阈值/指标/判定）、Kalibr 的 `camchain.yaml`；质量未达标在 `info.yaml` 的 `judgement` 里明确标为 `DRAFT`。
+坐标约定与失败边界见 [运行手册 §8](docs/operations.md#8-标定结果导出)。
 接受的完整角点和实际配置持续留在 `<output.root>/sessions/s-*/`；`--replay-observations` 可不连设备重新全量求解，见 [观测留存与重算](docs/operations.md#81-完整观测留存与离线重算)。
 
 模型由 `solver.models` 选择：`[kb4]` 用 OpenCV，`[ds]` 默认用原生 Rust DS；

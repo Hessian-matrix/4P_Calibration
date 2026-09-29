@@ -137,15 +137,14 @@ def configs(destination):
     import yaml
 
     destination.mkdir()
-    rig = yaml.safe_load((ROOT / "crates/rigcal-gui/example.rig.yaml").read_text(encoding="utf-8"))
-    for index, camera in enumerate(rig["rig"]["cameras"]):
+    example = yaml.safe_load((ROOT / "crates/rigcal-gui/example.yaml").read_text(encoding="utf-8"))
+    for index, camera in enumerate(example["cameras"]):
         camera["guidance"] = {"type": "rtsp", "url": f"rtsp://10.21.12.162:{554 + index}/PRR"}
-    rig["rig"]["evidence"] = {"host": "10.21.12.162", "port": 30432}
-    camera = yaml.safe_load((ROOT / "crates/rigcal-core/tests/fixtures/session_single.yaml").read_text(encoding="utf-8"))
-    camera["capture"]["evidence"]["port"] = 30432
-    camera["solver"]["models"] = ["kb4"]
-    for name, value in (("rig.example.yaml", rig), ("camera.example.yaml", camera)):
-        (destination / name).write_text(yaml.safe_dump(value, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    # 证据端口以板端 `~/demo/config/sensor_config.yaml` 的 `raw_server.port` 为准。
+    example["evidence"] = {"host": "10.21.12.162", "port": 30432}
+    (destination / "example.yaml").write_text(
+        yaml.safe_dump(example, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
 
 
 def rust_licenses(destination, target):
@@ -600,9 +599,9 @@ def package_release(args):
     shutil.copy2(ROOT / "Cargo.lock", output / "Cargo.lock")
     (output / "RUN.txt").write_text(
         "Keep the complete extracted directory together; do not copy only the executable.\n"
-        "Edit config/*.example.yaml: device IP, raw port, image size and measured board geometry.\n"
-        "GUI: rigcal-gui --config config/rig.example.yaml\n"
-        "CLI: rigcal-camera --config config/camera.example.yaml --live\n"
+        "Edit config/example.yaml: device IP, raw port, image size and measured board geometry.\n"
+        "GUI: rigcal-gui --config config/example.yaml\n"
+        "CLI: rigcal-camera --config config/example.yaml --live (keep a single cameras entry)\n"
         "Linux: prefix executable names with ./ ; desktop/OpenGL required for GUI.\n"
         "Windows: use .\\rigcal-gui.exe or .\\rigcal-camera.exe in PowerShell; OpenGL driver required for GUI.\n"
         "--help needs no camera. --check-deps additionally needs ldd (Linux) or dumpbin (Windows).\n"

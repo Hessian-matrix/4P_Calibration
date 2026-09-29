@@ -171,14 +171,6 @@ pub fn quality_thresholds(config: &Config) -> QualityThresholds {
     }
 }
 
-pub fn thresholds(config: &Config) -> SessionThresholds {
-    SessionThresholds {
-        max_holdout_rms_px: config.solver.max_holdout_rms_px,
-        max_holdout_p95_px: config.solver.max_holdout_p95_px,
-        ..SessionThresholds::default()
-    }
-}
-
 pub fn request_export(shared: &Shared, candidates: &Latest<Candidate>) {
     if let Ok(mut state) = shared.rig.lock() {
         if state.export_requested || state.finalizing || state.finalized {
@@ -199,23 +191,26 @@ impl Pipeline {
         stop: Arc<AtomicBool>,
         max_groups: Option<usize>,
     ) -> Result<Self, String> {
-        let rig = config.rig.as_ref().ok_or("missing rig")?;
-        let specs: Vec<_> = rig
+        let evidence = config
+            .evidence
+            .as_ref()
+            .ok_or("配置缺少 evidence 段（板端 raw 服务端点）")?;
+        let specs: Vec<_> = config
             .cameras
             .iter()
             .map(|camera| CameraGroupSpec {
-                camera_id: camera.camera_id.clone(),
-                raw_camera_id: camera
-                    .raw_camera_id
-                    .unwrap_or_else(|| camera.camera_id[3..].parse().unwrap_or(0))
-                    as i32,
+                camera_id: camera.id.clone(),
+                raw_camera_id: camera.channel() as i32,
             })
             .collect();
+        let primary = specs
+            .first()
+            .ok_or("配置没有 cameras（多路 rig 至少两路）")?;
         let capture = GroupCapture::new(
-            &rig.evidence.host,
-            rig.evidence.port,
+            &evidence.host,
+            evidence.port,
             &specs,
-            &specs[0].camera_id,
+            &primary.camera_id,
             config.image_size(),
             3.0,
             GroupCaptureOptions::default(),
@@ -224,6 +219,7 @@ impl Pipeline {
         let journal = observations::create(Path::new(&config.output.root), &config)
             .map_err(|error| format!("无法创建观测会话：{error}"))?;
         log_line(format!("完整角点观测：{}", journal.path().display()));
+        let journal_path = journal.path().to_path_buf();
         let config = Arc::new(config);
         let candidates = Arc::new(Latest::new());
         let datasets = Arc::new(Latest::new());
@@ -234,18 +230,25 @@ impl Pipeline {
             .spawn({
                 let config = Arc::clone(&config);
                 let shared = Arc::clone(&shared);
+                let journal_path = journal_path.clone();
                 move || {
                     let mut saved = None;
                     while let Ok(command) = export_rx.recv() {
                         match command {
                             ExportCommand::Save(snapshot) => {
-                                let _ =
-                                    save_calibration(Some(&snapshot), &config, &shared, &mut saved);
+                                let _ = save_calibration(
+                                    Some(&snapshot),
+                                    &config,
+                                    Some(journal_path.as_path()),
+                                    &shared,
+                                    &mut saved,
+                                );
                             }
                             ExportCommand::Finish(snapshot) => {
                                 return save_calibration(
                                     snapshot.as_deref(),
                                     &config,
+                                    Some(journal_path.as_path()),
                                     &shared,
                                     &mut saved,
                                 );
@@ -519,7 +522,6 @@ fn audit_worker(
     max_groups: Option<usize>,
     mut journal: ObservationJournal,
 ) -> Result<(), String> {
-    let rig = config.rig.as_ref().expect("validated rig");
     let board = config.board_config().expect("validated board");
     let quality = quality_thresholds(config);
     let mut border_bits = HashMap::new();
@@ -546,10 +548,10 @@ fn audit_worker(
         let mut outcomes = Vec::new();
         let mut execution_failed = false;
         for entry in &group.frames {
-            let Some(index) = rig
+            let Some(index) = config
                 .cameras
                 .iter()
-                .position(|c| c.camera_id == entry.camera_id)
+                .position(|c| c.id == entry.camera_id)
             else {
                 continue;
             };
@@ -717,14 +719,17 @@ struct RigSolver<'a> {
 
 impl<'a> RigSolver<'a> {
     fn new(config: &'a Config) -> Result<Self, String> {
-        let rig = config.rig.as_ref().ok_or("missing rig")?;
+        let extrinsics = config
+            .extrinsics
+            .as_ref()
+            .ok_or("外参求解需要 extrinsics 段（≥2 路）")?;
         let model = config
             .solver
             .models
             .first()
             .copied()
             .unwrap_or(ModelKind::Kb4);
-        let sessions = rig
+        let sessions = config
             .cameras
             .iter()
             .map(|_| {
@@ -737,7 +742,7 @@ impl<'a> RigSolver<'a> {
                         holdout_fraction: config.solver.holdout_fraction,
                         min_holdout_views: config.solver.official_holdout_frames,
                     },
-                    thresholds(config),
+                    SessionThresholds::from_config(config),
                     backend_for(model, config)?,
                 ))
             })
@@ -747,7 +752,7 @@ impl<'a> RigSolver<'a> {
             model,
             sessions,
             records: Vec::new(),
-            edges: rig
+            edges: extrinsics
                 .required_edges
                 .iter()
                 .map(|e| (e[0].clone(), e[1].clone()))
@@ -761,7 +766,11 @@ impl<'a> RigSolver<'a> {
     }
 
     fn evaluate(&mut self, shared: &Shared, version: usize, refine: bool) -> Result<(), String> {
-        let rig = self.config.rig.as_ref().expect("validated rig");
+        let config = self.config;
+        let extrinsics = config
+            .extrinsics
+            .as_ref()
+            .ok_or("外参求解需要 extrinsics 段（≥2 路）")?;
         let started = Instant::now();
         if let Ok(mut state) = shared.rig.lock() {
             state.solving_version = Some(version);
@@ -775,7 +784,7 @@ impl<'a> RigSolver<'a> {
             }
         }
         let mut states = BTreeMap::new();
-        for (camera, session) in rig.cameras.iter().zip(&mut self.sessions) {
+        for (camera, session) in config.cameras.iter().zip(&mut self.sessions) {
             let state = if refine {
                 session.refine()
             } else {
@@ -784,7 +793,7 @@ impl<'a> RigSolver<'a> {
             .state;
             log_line(format!(
                 "{} V{version} {} views={} used={} excl={} holdout={}：{}",
-                camera.camera_id,
+                camera.id,
                 if refine {
                     "全量精修"
                 } else {
@@ -796,33 +805,34 @@ impl<'a> RigSolver<'a> {
                 state.holdout_views,
                 state.detail,
             ));
-            states.insert(camera.camera_id.clone(), state);
+            states.insert(camera.id.clone(), state);
         }
         let mut complete = None;
         let mut error = None;
         if self.sessions.iter().all(Session::has_current_solution) {
-            let parameters = rig
+            let parameters = config
                 .cameras
                 .iter()
                 .zip(&self.sessions)
-                .map(|(camera, session)| (camera.camera_id.clone(), *session.parameters()))
+                .map(|(camera, session)| (camera.id.clone(), *session.parameters()))
                 .collect();
             match solve_rig(
                 &self.records,
                 &parameters,
                 self.model,
                 &self.edges,
-                &rig.required_cycles,
-                rig.min_groups_per_edge,
+                &extrinsics.required_cycles,
+                extrinsics.min_groups_per_edge,
             ) {
                 Ok(estimate) => {
                     let connected =
                         reference_transforms(&estimate, "cam0").is_ok_and(|transforms| {
-                            rig.cameras
+                            config
+                                .cameras
                                 .iter()
-                                .all(|camera| transforms.contains_key(&camera.camera_id))
+                                .all(|camera| transforms.contains_key(&camera.id))
                         });
-                    if connected && estimate.cycles.len() == rig.required_cycles.len() {
+                    if connected && estimate.cycles.len() == extrinsics.required_cycles.len() {
                         complete = Some(Arc::new(CalibrationSnapshot {
                             states: states.clone(),
                             estimate,
@@ -836,12 +846,13 @@ impl<'a> RigSolver<'a> {
             }
         } else {
             error = Some(
-                rig.cameras
+                config
+                    .cameras
                     .iter()
                     .zip(&self.sessions)
                     .filter(|(_, session)| !session.has_current_solution())
                     .map(|(camera, _)| {
-                        format!("{}：{}", camera.camera_id, states[&camera.camera_id].detail)
+                        format!("{}：{}", camera.id, states[&camera.id].detail)
                     })
                     .collect::<Vec<_>>()
                     .join("；"),
@@ -908,10 +919,12 @@ pub fn replay(path: &Path, output: Option<&Path>) -> Result<(), String> {
     if let Some(output) = output {
         config.output.root = output.to_string_lossy().into_owned();
     }
-    let rig = config.rig.as_ref().ok_or("观测会话缺少 rig 配置")?;
+    let cameras = &config.cameras;
+    if cameras.is_empty() {
+        return Err("观测会话配置缺少 cameras（无法确定内参会话）".to_owned());
+    }
     let shared = Shared {
-        tiles: rig
-            .cameras
+        tiles: cameras
             .iter()
             .map(|_| Mutex::new(crate::TileState::default()))
             .collect(),
@@ -923,10 +936,9 @@ pub fn replay(path: &Path, output: Option<&Path>) -> Result<(), String> {
     for group in groups {
         version = group.version;
         for view in group.views {
-            let index = rig
-                .cameras
+            let index = cameras
                 .iter()
-                .position(|camera| camera.camera_id == view.camera_id)
+                .position(|camera| camera.id == view.camera_id)
                 .ok_or_else(|| format!("观测中的相机 {} 不在配置中", view.camera_id))?;
             solver.ingest(
                 index,
@@ -945,7 +957,8 @@ pub fn replay(path: &Path, output: Option<&Path>) -> Result<(), String> {
     ));
     solver.evaluate(&shared, version, true)?;
     let snapshot = shared.snapshot.lock().unwrap_or_else(|e| e.into_inner());
-    save_calibration(snapshot.as_deref(), &config, &shared, &mut None)
+    // 重放的观测日志就是产出该快照的会话文件，直接记进 info.yaml。
+    save_calibration(snapshot.as_deref(), &config, Some(path), &shared, &mut None)
 }
 
 fn publish_result(
@@ -956,7 +969,7 @@ fn publish_result(
     complete: Option<Arc<CalibrationSnapshot>>,
     error: Option<String>,
 ) {
-    let rig = config.rig.as_ref().expect("rig");
+    let extrinsics = config.extrinsics.as_ref().expect("validated extrinsics");
     // GUI takes the same lock before reading all metric rows: never display new intrinsics
     // beside old extrinsics. An incomplete evaluation cannot replace a published result.
     let mut state = shared.rig.lock().unwrap_or_else(|e| e.into_inner());
@@ -965,15 +978,15 @@ fn publish_result(
     state.solve_error = error.as_ref().map(|error| format!("V{version}：{error}"));
     state.message = error.unwrap_or_else(|| format!("完整内外参 V{version} 已发布"));
     let preserve_metrics = complete.is_none() && state.complete_version.is_some();
-    for (index, camera) in rig.cameras.iter().enumerate() {
-        if let Some(result) = states.get(&camera.camera_id)
+    for (index, camera) in config.cameras.iter().enumerate() {
+        if let Some(result) = states.get(&camera.id)
             && let Ok(mut tile) = shared.tiles[index].lock()
         {
             tile.solve_detail = format!("诊断 V{version} [{}]：{}", result.status, result.detail);
             if preserve_metrics {
                 continue;
             }
-            tile.metrics = metrics_of(result, thresholds(config));
+            tile.metrics = metrics_of(result, SessionThresholds::from_config(config));
             tile.note = format!(
                 " 指标V{version}/{}张 used={} excl={} holdout={}",
                 result.views, result.used_views, result.excluded_views, result.holdout_views
@@ -996,19 +1009,19 @@ fn publish_result(
             state.rows.push((
                 format!("V{version} 边 {}-{} rms", edge.camera_a, edge.camera_b),
                 edge.reprojection_rms_px,
-                rig.max_edge_rms_px,
+                extrinsics.max_edge_rms_px,
             ));
         }
         for cycle in &snapshot.estimate.cycles {
             state.rows.push((
                 format!("V{version} 环 {} rot", cycle.cameras.join("-")),
                 cycle.rotation_error_deg,
-                rig.max_cycle_rotation_deg,
+                extrinsics.max_cycle_rotation_deg,
             ));
             state.rows.push((
                 format!("V{version} 环 {} trans", cycle.cameras.join("-")),
                 cycle.translation_error_mm,
-                rig.max_cycle_translation_mm,
+                extrinsics.max_cycle_translation_mm,
             ));
         }
         let mut published = shared.snapshot.lock().unwrap_or_else(|e| e.into_inner());

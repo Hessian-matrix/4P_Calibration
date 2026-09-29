@@ -3802,6 +3802,7 @@ dependencies = [
 name = "rigcal-io"
 version = "0.0.1"
 dependencies = [
+ "chrono",
  "ffmpeg-next",
  "rigcal-core",
  "serde",
