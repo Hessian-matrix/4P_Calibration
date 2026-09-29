@@ -63,7 +63,7 @@ target/debug/rigcal-gui --check-deps
 
 GUI 在两平台都需要桌面环境与可用的 OpenGL 驱动；Linux 支持 X11／Wayland。无桌面设备可运行 CLI 或角点重算，但不能启动 GUI。glibc、系统动态加载器、Windows 系统 DLL 和 GPU 厂商驱动由操作系统提供，不随包替换。
 
-CI 从 `Cargo.toml` 的 `workspace.package.rust-version` 选择 Rust 工具链，并用 `--locked --release` 构建、测试及执行零告警 Clippy。Windows 在加载 MSVC 开发环境后，通过 `CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER` 指定 `link.exe` 的绝对路径，避免 Git Bash 的同名 Unix 工具抢先被找到；不要仅靠调整 `PATH` 替代此配置。
+CI 从 `Cargo.toml` 的 `workspace.package.rust-version` 选择 Rust 工具链，并用 `--locked --release` 构建、测试及执行零告警 Clippy；`prepare` 阶段另跑发布脚本自身的单元测试（`python -m unittest discover -s tools/release`）。Windows 在加载 MSVC 开发环境后，通过 `CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER` 指定 `link.exe` 的绝对路径，避免 Git Bash 的同名 Unix 工具抢先被找到；不要仅靠调整 `PATH` 替代此配置。
 
 **如何触发**：
 
