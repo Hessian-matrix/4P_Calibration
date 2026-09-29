@@ -1,0 +1,22 @@
+[package]
+name = "rigcal-ds"
+description = "DS（Double Sphere）求解后端：Rust 原生（第三方 LM + 本仓模型），scipy 桥只作对拍参照"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rigcal-core = { path = "../rigcal-core" }
+nalgebra = { workspace = true }
+levenberg-marquardt = "0.15"
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+rigcal-opencv = { path = "../rigcal-opencv" } # 真机夹具的 KB4 初始化
+serde = { workspace = true }
+
+[lints]
+workspace = true

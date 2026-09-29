@@ -1,0 +1,38 @@
+[package]
+name = "rigcal-gui"
+description = "四路仪表盘（Slint）：2×2 实时预览 + 检测叠加 + 右栏内参/外参收敛进度"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "rigcal-gui"
+path = "src/main.rs"
+
+[dependencies]
+rigcal-core = { path = "../rigcal-core" }
+rigcal-io = { path = "../rigcal-io" }
+rigcal-camera = { path = "../rigcal-camera" }
+rigcal-opencv = { path = "../rigcal-opencv" }
+slint = { version = "=1.18.1", default-features = false, features = [
+  "backend-winit", "renderer-femtovg", "compat-1-2",
+] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+# OpenCV 4.x/5.x 都要能编：标定模块 5.x 叫 `calib`、4.x 叫 `calib3d`，两个 feature 都开，
+# opencv 的 build 按实际存在的头文件取模块子集（缺的静默跳过）。
+opencv = { version = "=0.99.0", default-features = false, features = [
+  "clang-runtime", "imgcodecs", "imgproc", "objdetect", "aruco_detector", "features", "calib", "calib3d",
+] }
+
+[build-dependencies]
+slint-build = "=1.18.1"
+
+# Slint 生成的代码里带 `#[allow(unsafe_code)]`，与工作区的 `forbid` 冲突（E0453）。
+# 本 crate 降到 `deny`：生成代码按它自己的 allow 走，本仓手写代码仍是硬拒绝。
+[lints.rust]
+unsafe_code = "deny"

@@ -1,0 +1,30 @@
+[workspace]
+members = [
+    "crates/rigcal-core",
+    "crates/rigcal-camera",
+    "crates/rigcal-io",
+    "crates/rigcal-opencv",
+    "crates/rigcal-gui",
+    "crates/rigcal-ds",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+rust-version = "1.92"
+license = "UNLICENSED"
+publish = false
+
+[workspace.dependencies]
+nalgebra = "0.34"   # 与 levenberg-marquardt 0.15 对齐（求解后端用同一个版本，避免双版本互不兼容）
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+thiserror = "2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[profile.dev]
+opt-level = 2

@@ -1,0 +1,50 @@
+[package]
+name = "rigcal-io"
+description = "采集适配器：板端 raw 帧服务（RWF1/TCP）与 RTSP 解码（ffmpeg）；不含算法、不含 GUI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# 演练/探针工具：默认不构建（`cargo build` / `cargo test` 都不会产出它们），
+# 需要时显式 `--features drills`。这些是**现场 bring-up 与无相机演练**用的入口，
+# 不是产线路径的一部分。
+drills = []
+
+[dependencies]
+rigcal-core = { path = "../rigcal-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = "2"
+ffmpeg-next = { version = "=9.0.0", default-features = false, features = ["codec", "format", "software-scaling"] }
+
+[[bin]]
+name = "clock-calibrate"
+path = "src/bin/clock_calibrate.rs"
+required-features = ["drills"]
+
+[[bin]]
+name = "mock-raw-server"
+path = "src/bin/mock_raw_server.rs"
+required-features = ["drills"]
+
+[[bin]]
+name = "raw-probe"
+path = "src/bin/raw_probe.rs"
+required-features = ["drills"]
+
+[[bin]]
+name = "group-probe"
+path = "src/bin/group_probe.rs"
+required-features = ["drills"]
+
+[[bin]]
+name = "decode-probe"
+path = "src/bin/decode_probe.rs"
+required-features = ["drills"]
+
+[lints]
+workspace = true

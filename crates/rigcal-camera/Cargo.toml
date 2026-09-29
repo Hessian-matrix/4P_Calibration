@@ -1,0 +1,33 @@
+[package]
+name = "rigcal-camera"
+description = "单相机内参产线：帧源 → AprilTag 检测 → OpenCV 预览 + TUI 进度 → 求解 → YAML 结果"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "rigcal-camera"
+path = "src/main.rs"
+
+
+[dependencies]
+rigcal-core = { path = "../rigcal-core" }
+rigcal-io = { path = "../rigcal-io" }
+rigcal-ds = { path = "../rigcal-ds" }
+rigcal-opencv = { path = "../rigcal-opencv" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+# OpenCV 4.x/5.x 都要能编：标定模块 5.x 叫 `calib`、4.x 叫 `calib3d`，两个 feature 都开，
+# opencv 的 build 按实际存在的头文件取模块子集（缺的静默跳过）。
+# `calib = ["features"]`、`calib3d = ["features2d"]` 由 opencv 强制耦合。
+# 预览使用终端与 PNG，不依赖 highgui。
+opencv = { version = "=0.99.0", default-features = false, features = [
+  "clang-runtime", "imgcodecs", "imgproc", "objdetect", "aruco_detector", "features", "calib", "calib3d",
+] }
+
+[lints]
+workspace = true

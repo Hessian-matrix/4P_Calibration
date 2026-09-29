@@ -1,0 +1,41 @@
+{
+ "model": "ds",
+ "image_size": [
+  1280,
+  1088
+ ],
+ "reference_camera": "cam0",
+ "min_groups_per_edge": 3,
+ "required_edges": [
+  [
+   "cam0",
+   "cam1"
+  ],
+  [
+   "cam1",
+   "cam2"
+  ],
+  [
+   "cam2",
+   "cam3"
+  ],
+  [
+   "cam3",
+   "cam0"
+  ]
+ ],
+ "required_cycles": [
+  [
+   "cam0",
+   "cam1",
+   "cam2",
+   "cam3"
+  ]
+ ],
+ "target": {
+  "rows": 6,
+  "cols": 6,
+  "tag_size_m": 0.04,
+  "tag_spacing_ratio": 0.01
+ }
+}

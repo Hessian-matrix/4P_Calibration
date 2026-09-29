@@ -1,0 +1,50 @@
+schema_version: 1
+device:
+  camera_id: cam0
+  image_size: [1280, 1088]
+capture:
+  guidance:
+    type: rtsp
+    url: rtsp://10.21.12.162:554/PRR
+  evidence:
+    host: 10.21.12.162
+    port: 4200
+    camera: 0
+board:
+  target_type: aprilgrid
+  target_id: robobaton_4p_6x6_36h11
+  measured: true
+  rows: 6
+  cols: 6
+  first_tag_id: 0
+  tag_corner_order: [bottom_right, bottom_left, top_left, top_right]
+  tag_size_m: 0.088
+  tag_spacing_ratio: 0.3
+  dictionary: DICT_APRILTAG_36h11
+guidance:
+  detect_scale: 0.75
+  detect_hz: 0.5
+  detect_hz_max: 12.0
+  jitter_xyz: 0.025
+  jitter_z: 0.04
+  jitter_rotation_deg: 2.0
+  trigger_novelty_scale: 3.0
+  trigger_min_interval_s: 0.5
+solver:
+  models: [kb4, ds]
+  min_observations: 12
+  max_solve_observations: 30
+  holdout_fraction: 0.25
+  official_holdout_frames: 8
+  max_holdout_rms_px: 1.0
+  max_holdout_p95_px: 1.0
+  quality:
+    min_focus_score: 500.0
+    min_contrast: 20.0
+    max_saturated_fraction: 0.35
+  ds_initial_candidates:
+    - [-0.2, 0.35]
+    - [0.0, 0.5]
+    - [0.2, 0.65]
+output:
+  root: calibration_runs

@@ -1,0 +1,131 @@
+cam0:
+  camera_model: ds
+  distortion_coeffs: []
+  distortion_model: none
+  intrinsics:
+  - 576.0
+  - 576.0
+  - 640.0
+  - 544.0
+  - 0.4
+  - 0.55
+  resolution:
+  - 1280
+  - 1088
+  rostopic: /cam0/image_raw
+  tagCols: 6
+  tagRows: 6
+  tagSize: 0.04
+  tagSpacing: 0.01
+  target_type: aprilgrid
+cam1:
+  T_cn_cnm1:
+  - - 0.9984100015831096
+    - 0.05390809200682675
+    - -0.01647380815108455
+    - 0.008827125538377598
+  - - -0.053850492242086975
+    - 0.9985413128753697
+    - 0.003920582407988617
+    - 0.011568827363862878
+  - - 0.016661129136411133
+    - -0.003027226010129019
+    - 0.9998566110590975
+    - -0.0016830957190015414
+  - - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
+  camera_model: ds
+  distortion_coeffs: []
+  distortion_model: none
+  intrinsics:
+  - 576.0
+  - 576.0
+  - 640.0
+  - 544.0
+  - 0.4
+  - 0.55
+  resolution:
+  - 1280
+  - 1088
+  rostopic: /cam1/image_raw
+  tagCols: 6
+  tagRows: 6
+  tagSize: 0.04
+  tagSpacing: 0.01
+  target_type: aprilgrid
+cam2:
+  T_cn_cnm1:
+  - - 0.9941861845194168
+    - 0.05285478000237234
+    - 0.09380939580673775
+    - -0.017837908017005105
+  - - -0.05069285813249
+    - 0.9983942169230042
+    - -0.0252828350676953
+    - -0.009736182685419063
+  - - -0.09499507695182742
+    - 0.020380378936660136
+    - 0.9952690970332166
+    - 0.05585212520755581
+  - - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
+  camera_model: ds
+  distortion_coeffs: []
+  distortion_model: none
+  intrinsics:
+  - 576.0
+  - 576.0
+  - 640.0
+  - 544.0
+  - 0.4
+  - 0.55
+  resolution:
+  - 1280
+  - 1088
+  rostopic: /cam2/image_raw
+  tagCols: 6
+  tagRows: 6
+  tagSize: 0.04
+  tagSpacing: 0.01
+  target_type: aprilgrid
+cam3:
+  T_cn_cnm1:
+  - - 0.9998780960657708
+    - -0.015613847075063766
+    - -2.806074992681689e-05
+    - 0.014519258859610073
+  - - 0.015609192028952142
+    - 0.999532768384319
+    - 0.026279232298192193
+    - -0.014035386753523256
+  - - -0.00038227227529678484
+    - -0.026276466762020605
+    - 0.9996546409447674
+    - -0.00028425617590153995
+  - - 0.0
+    - 0.0
+    - 0.0
+    - 1.0
+  camera_model: ds
+  distortion_coeffs: []
+  distortion_model: none
+  intrinsics:
+  - 576.0
+  - 576.0
+  - 640.0
+  - 544.0
+  - 0.4
+  - 0.55
+  resolution:
+  - 1280
+  - 1088
+  rostopic: /cam3/image_raw
+  tagCols: 6
+  tagRows: 6
+  tagSize: 0.04
+  tagSpacing: 0.01
+  target_type: aprilgrid

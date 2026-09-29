@@ -1,0 +1,19 @@
+[package]
+name = "rigcal-core"
+description = "标定核心算法：板几何、DS/KB4 投影模型、有界 LM、位姿/内参估计、数值可观测性（无 IO、无 GUI、无 OpenCV）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+nalgebra = { workspace = true }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

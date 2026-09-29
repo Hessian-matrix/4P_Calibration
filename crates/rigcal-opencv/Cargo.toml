@@ -1,0 +1,26 @@
+[package]
+name = "rigcal-opencv"
+description = "OpenCV 求解/检测后端（适配层）：把观测交给 OpenCV 已证可用的实现，结果转回本仓契约；core 保持纯 Rust"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rigcal-core = { path = "../rigcal-core" }
+serde = { workspace = true }
+thiserror = "2"
+serde_json = { workspace = true }
+# 4.x 使用 calib3d；5.x 使用 calib。绑定按实际安装的头文件选择模块。
+# calib/calib3d 分别隐含 features/features2d；同时启用以支持两版。
+# objdetect 的生成绑定需要 dnn；不启用 highgui（预览不使用 OpenCV 窗口）。
+opencv = { version = "=0.99.0", default-features = false, features = [
+  "clang-runtime", "features", "calib", "calib3d", "dnn", "imgproc",
+] }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

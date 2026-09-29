@@ -1,0 +1,260 @@
+// 四路标定仪表盘：左侧 2×2 实时预览（含检测叠加），右侧收敛进度栏。
+//
+// 布局与状态：
+//   - 预览格：标题（camN + 状态 + tags/角点数）、画面、清晰度/对比度数值行；
+//   - 入库时对应预览格短暂显示绿色边框；
+//   - 右栏：phase/groups → 消息 → `intrinsics (value / limit)` 逐路指标条 →
+//     `extrinsics (value / limit)` 边/环指标条 → hint。
+//
+// NaN/除零一律在 Rust 侧处理完再传进来（`ratio` 已是 0..1 的有限值），
+// Slint 侧只做渲染，不承担数值语义。
+
+import { Button } from "std-widgets.slint";
+
+export struct Bar {
+    label: string,
+    text: string,
+    /// 0..1：value/limit 的比值（越小越好），已裁剪且保证有限。
+    ratio: float,
+}
+
+export struct CameraTile {
+    id: string,
+    status: string,
+    detail: string,
+    quality: string,
+    clock-status: string,
+    solve-detail: string,
+    views: int,
+    note: string,
+    metrics: [Bar],
+    capture-flash: bool,
+    has-image: bool,
+}
+
+export struct RigRow {
+    label: string,
+    text: string,
+    ratio: float,
+}
+
+component MetricBar inherits Rectangle {
+    in property <Bar> bar;
+    height: 18px;
+    background: #33383f;
+    property <color> fill-color: bar.ratio <= 0.5 ? #5abe5a : (bar.ratio <= 1.0 ? #d8b23c : #d05050);
+    Rectangle {
+        x: 0;
+        y: 0;
+        height: parent.height;
+        width: parent.width * Math.max(0.0, Math.min(1.0, root.bar.ratio));
+        background: root.fill-color;
+    }
+    Text {
+        x: 6px;
+        vertical-alignment: center;
+        text: root.bar.text;
+        color: #eceff1;
+        font-size: 12px;
+        font-family: "monospace";
+    }
+}
+
+component Tile inherits Rectangle {
+    in property <CameraTile> info;
+    in property <image> frame;
+    border-width: 2px;
+    border-color: info.capture-flash ? #50e650 : #2a3038;
+    background: #1b1f26;
+    VerticalLayout {
+        padding: 4px;
+        spacing: 2px;
+        Text {
+            text: info.id + "   " + info.status + "   " + info.detail;
+            color: #e6e6e6;
+            font-size: 13px;
+            font-family: "monospace";
+        }
+        Text {
+            text: info.clock-status;
+            color: #d8c89c;
+            font-size: 12px;
+            wrap: word-wrap;
+            max-height: 44px;
+            overflow: elide;
+        }
+        Rectangle {
+            Image {
+                source: root.frame;
+                image-fit: contain;
+                width: 100%;
+                height: 100%;
+            }
+            Text {
+                text: root.info.has-image ? "" : "（无画面）";
+                color: #5a6270;
+                font-size: 14px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        Text {
+            text: info.quality;
+            color: #9aa0a6;
+            font-size: 12px;
+            font-family: "monospace";
+        }
+    }
+}
+
+export component Dashboard inherits Window {
+    in property <string> phase;
+    in property <string> message;
+    in property <string> hint;
+    in property <int> groups;
+    in property <string> counters;
+    in property <string> error;
+    in property <[CameraTile]> tiles;
+    in property <[RigRow]> rig-rows;
+    in property <[image]> frames;
+    in property <bool> can-export;
+    in property <bool> export-pending;
+    in property <bool> export-error;
+    in property <string> export-message;
+    callback export-results();
+    callback retry-clocks();
+
+    title: "rigcal — 四路标定仪表盘";
+    width: 1720px;
+    height: 1000px;
+    background: #14171c;
+
+    HorizontalLayout {
+        // ---- 左：2×2 预览 ----
+        VerticalLayout {
+            HorizontalLayout {
+                Tile {
+                    info: root.tiles.length > 0 ? root.tiles[0] : { id: "cam0", status: "WAITING", detail: "", quality: "", clock-status: "", solve-detail: "", views: 0, note: "", metrics: [], capture-flash: false, has-image: false };
+                    frame: root.frames.length > 0 ? root.frames[0] : @image-url("");
+                }
+                Tile {
+                    info: root.tiles.length > 1 ? root.tiles[1] : { id: "cam1", status: "WAITING", detail: "", quality: "", clock-status: "", solve-detail: "", views: 0, note: "", metrics: [], capture-flash: false, has-image: false };
+                    frame: root.frames.length > 1 ? root.frames[1] : @image-url("");
+                }
+            }
+            HorizontalLayout {
+                Tile {
+                    info: root.tiles.length > 2 ? root.tiles[2] : { id: "cam2", status: "WAITING", detail: "", quality: "", clock-status: "", solve-detail: "", views: 0, note: "", metrics: [], capture-flash: false, has-image: false };
+                    frame: root.frames.length > 2 ? root.frames[2] : @image-url("");
+                }
+                Tile {
+                    info: root.tiles.length > 3 ? root.tiles[3] : { id: "cam3", status: "WAITING", detail: "", quality: "", clock-status: "", solve-detail: "", views: 0, note: "", metrics: [], capture-flash: false, has-image: false };
+                    frame: root.frames.length > 3 ? root.frames[3] : @image-url("");
+                }
+            }
+        }
+
+        // ---- 右：收敛进度 ----
+        Rectangle {
+            width: 430px;
+            background: #181c22;
+            VerticalLayout {
+                padding: 12px;
+                spacing: 6px;
+                Text {
+                    text: "phase: " + root.phase + "   groups ingested: " + root.groups;
+                    color: #eceff1;
+                    font-size: 14px;
+                    font-family: "monospace";
+                }
+                Text {
+                    text: root.counters;
+                    color: #e6e6e6;
+                    font-size: 13px;
+                    font-family: "monospace";
+                    wrap: word-wrap;
+                }
+                if root.error != "" : Text {
+                    text: "✗ " + root.error;
+                    color: #ff8080;
+                    font-size: 12px;
+                    font-family: "monospace";
+                    wrap: word-wrap;
+                    max-height: 60px;
+                    overflow: elide;
+                }
+                Text {
+                    text: root.message;
+                    color: #98a0a8;
+                    font-size: 12px;
+                    font-family: "monospace";
+                    wrap: word-wrap;
+                    max-height: 92px;
+                    overflow: elide;
+                }
+                Button {
+                    text: root.export-pending ? "正在全量精修 / 导出…" : "结束采集并全量精修导出";
+                    enabled: root.can-export;
+                    clicked => { root.export-results(); }
+                }
+                Button {
+                    text: "重试未就绪时钟";
+                    clicked => { root.retry-clocks(); }
+                }
+                Text {
+                    text: root.export-message;
+                    color: root.export-error ? #ff8080 : #cfd8dc;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                    max-height: 76px;
+                    overflow: elide;
+                }
+                Text {
+                    text: "intrinsics (value / limit)";
+                    color: #eceff1;
+                    font-size: 13px;
+                    font-family: "monospace";
+                }
+                Rectangle { height: 4px; background: transparent; }
+                for tile in root.tiles : VerticalLayout {
+                    spacing: 2px;
+                    Text {
+                        text: tile.id + "   " + tile.views + " views" + tile.note + "   " + tile.status;
+                        color: #cfd8dc;
+                        font-size: 12px;
+                        font-family: "monospace";
+                        wrap: word-wrap;
+                    }
+                    if tile.solve-detail != "" : Text {
+                        text: tile.solve-detail;
+                        color: #d8c89c;
+                        font-size: 11px;
+                        wrap: word-wrap;
+                        max-height: 58px;
+                        overflow: elide;
+                    }
+                    for bar in tile.metrics : MetricBar { bar: bar; }
+                    Rectangle { height: 6px; background: transparent; }
+                }
+                if root.rig-rows.length > 0 : Text {
+                    text: "extrinsics (value / limit)";
+                    color: #eceff1;
+                    font-size: 13px;
+                    font-family: "monospace";
+                }
+                Rectangle { height: 4px; background: transparent; }
+                for row in root.rig-rows : MetricBar {
+                    bar: { label: row.label, text: row.text, ratio: row.ratio };
+                }
+                Rectangle { vertical-stretch: 1; background: transparent; }
+                Text {
+                    text: root.hint;
+                    color: #767f88;
+                    font-size: 12px;
+                    font-family: "monospace";
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+}

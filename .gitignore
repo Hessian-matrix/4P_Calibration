@@ -1,10 +1,23 @@
+# Python 可选参考后端及缓存
 .venv/
 __pycache__/
 *.py[cod]
 *.egg-info/
+
+# 构建产物
 build/
 dist/
+
+# 本地配置与标定数据
 calibration_runs/
 calibration_exports/
 local/
 *.log
+
+# Rust 与本地依赖
+target/
+.deps/
+.archive/
+
+# macOS 文件元数据
+.DS_Store
