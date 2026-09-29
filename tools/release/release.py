@@ -310,8 +310,185 @@ def msvc_licenses(bundle):
     return provenance
 
 
+def _split_debian_version(version):
+    """``version`` as ``(epoch, upstream, revision)`` (Debian policy §5.6.12).
+
+    The revision is what follows the *last* hyphen, so an upstream part that
+    contains one keeps it; the epoch is the leading integer before the first
+    colon and defaults to 0.
+    """
+    epoch = re.match(r"^(\d+):", version)
+    body = version[epoch.end():] if epoch else version
+    upstream, separator, revision = body.rpartition("-")
+    return (int(epoch[1]) if epoch else 0), (upstream if separator else body), (revision if separator else "")
+
+
+def debian_upstream_version(version):
+    """The upstream part of a Debian version.
+
+    Two source packages that share it unpack the same ``.orig.tar``, which is what
+    makes it the identity to compare a superseded packaging against the version a
+    bundled binary was built from.
+    """
+    return _split_debian_version(version)[1]
+
+
+def _version_character_order(character):
+    """dpkg's ``order()`` for one version character (``None`` is the end of a part)."""
+    if character is None or "0" <= character <= "9":
+        return 0
+    if "a" <= character <= "z" or "A" <= character <= "Z":
+        return ord(character)
+    if character == "~":
+        return -1
+    return ord(character) + 256
+
+
+def _compare_version_parts(left, right):
+    """dpkg's ``verrevcmp()`` over one version part: ``~`` first, digit runs numerically."""
+    left_index = right_index = 0
+    while left_index < len(left) or right_index < len(right):
+        while (
+            (left_index < len(left) and not "0" <= left[left_index] <= "9")
+            or (right_index < len(right) and not "0" <= right[right_index] <= "9")
+        ):
+            left_order = _version_character_order(left[left_index] if left_index < len(left) else None)
+            right_order = _version_character_order(right[right_index] if right_index < len(right) else None)
+            if left_order != right_order:
+                return -1 if left_order < right_order else 1
+            left_index += 1
+            right_index += 1
+        while left_index < len(left) and left[left_index] == "0":
+            left_index += 1
+        while right_index < len(right) and right[right_index] == "0":
+            right_index += 1
+        difference = 0
+        while (
+            left_index < len(left) and right_index < len(right)
+            and "0" <= left[left_index] <= "9" and "0" <= right[right_index] <= "9"
+        ):
+            if difference == 0:
+                difference = ord(left[left_index]) - ord(right[right_index])
+            left_index += 1
+            right_index += 1
+        if left_index < len(left) and "0" <= left[left_index] <= "9":
+            return 1
+        if right_index < len(right) and "0" <= right[right_index] <= "9":
+            return -1
+        if difference:
+            return -1 if difference < 0 else 1
+    return 0
+
+
+def debian_version_compare(left, right):
+    """Order two Debian versions: ``-1``, ``0`` or ``1``, as ``dpkg --compare-versions``.
+
+    Only what the source choice needs is covered, following Debian policy §5.6.12
+    and dpkg's ``verrevcmp()``: the numeric epoch wins first, then the upstream
+    part, then the revision, with ``~`` sorting before everything (including the
+    end of a part).
+    """
+    left_epoch, left_upstream, left_revision = _split_debian_version(left)
+    right_epoch, right_upstream, right_revision = _split_debian_version(right)
+    if left_epoch != right_epoch:
+        return -1 if left_epoch < right_epoch else 1
+    for left_part, right_part in ((left_upstream, right_upstream), (left_revision, right_revision)):
+        ordered = _compare_version_parts(left_part, right_part)
+        if ordered:
+            return ordered
+    return 0
+
+
+def choose_source_version(installed, available):
+    """Pick which published packaging of a source package a bundled binary corresponds to.
+
+    ``installed`` is the source version ``dpkg-query`` reports for the binary and
+    ``available`` what the enabled ``deb-src`` pockets publish.  The installed
+    version is used whenever the archive still has it.  Ubuntu keeps only the
+    newest version per pocket, so a runner image that predates a security update
+    reports a version the archive has already replaced; the newest packaging of
+    the same upstream version then stands in -- it unpacks the same ``.orig.tar``
+    and its patch series is the cumulative one -- and is returned as a
+    substitution for the caller to record.
+
+    ``(None, None)`` means nothing published corresponds: either no packaging is
+    built from the same upstream version, or all of them are older than the
+    installed binary, which carries patches they do not have.  The caller must
+    then abort rather than ship a source tree that is not the corresponding one.
+    """
+    if installed in available:
+        return installed, None
+    upstream = debian_upstream_version(installed)
+    newest = None
+    for candidate in available:
+        if debian_upstream_version(candidate) != upstream:
+            continue
+        if newest is None or debian_version_compare(candidate, newest) > 0:
+            newest = candidate
+    if newest is None or debian_version_compare(newest, installed) < 0:
+        return None, None
+    return newest, (
+        f"{installed} is no longer published for this release; shipping {newest}, "
+        f"the newest packaging of the same upstream version {upstream}"
+    )
+
+
+def source_unavailable_message(name, binaries, installed, available, policy=None):
+    """The fail-closed message for a bundled system library whose source is unobtainable.
+
+    It names the bundled libraries (what has to be accounted for), their source
+    package, the exact version the installed binary was built from and every
+    version the pockets still publish, and quotes the APT version table so the
+    packaging log itself shows which pockets carry which version.
+    """
+    return (
+        f"cannot obtain the corresponding source of {'/'.join(binaries)} (source package {name}): "
+        f"the installed version {installed} is no longer published by the enabled deb-src pockets, "
+        f"and no version they publish ({', '.join(available) if available else 'none'}) is a "
+        f"replacement built from the same upstream version {debian_upstream_version(installed)} at "
+        "least as new as the installed binary. Refresh the runner image or repin the bundled "
+        "library so its version is still in the archive; a release must not be packaged without "
+        "the corresponding source."
+        + (f"\napt-cache policy {' '.join(binaries)}:\n{policy}" if policy else "")
+    )
+
+
+def apt_source_versions(name):
+    """Every source version the enabled ``deb-src`` pockets publish for ``name``.
+
+    ``apt-cache showsrc`` answers from the same indexes ``apt-get source`` uses,
+    so this is the list the download is chosen from.
+    """
+    found = subprocess.run(["apt-cache", "showsrc", name], capture_output=True, text=True)
+    if found.returncode != 0:
+        raise RuntimeError(
+            f"apt-cache showsrc {name} failed ({found.returncode}): {found.stderr.strip()}. "
+            "The deb-src indexes are required to download the corresponding sources."
+        )
+    return sorted(set(re.findall(r"^Version: (.+)$", found.stdout, re.M)))
+
+
+def apt_version_table(binaries):
+    """``apt-cache policy`` for the bundled binaries; diagnostics for a failure, never fatal."""
+    try:
+        return capture("apt-cache", "policy", *binaries)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def fetch_system_source(name, version, directory):
+    """Download exactly ``version`` of source package ``name`` into ``directory``."""
+    try:
+        run("apt-get", "source", "--download-only", "--only-source", f"{name}={version}", cwd=directory)
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError(
+            f"downloading the corresponding source {name}={version} failed ({error.returncode}) "
+            "although the deb-src index lists it; the archive or mirror changed under the run."
+        ) from error
+
+
 def system_licenses_and_sources(bundle, prefix, downloads):
-    sources = set()
+    sources = {}
     records = json.loads((bundle / "native-dependencies.json").read_text(encoding="utf-8"))
     for record in records:
         if not record["bundled"]:
@@ -336,14 +513,25 @@ def system_licenses_and_sources(bundle, prefix, downloads):
         output = bundle / "LICENSES" / "system" / binary_name
         output.mkdir(parents=True, exist_ok=True)
         shutil.copy2(copyright_file, output / "copyright")
-        sources.add((name, version))
-    for name, version in sorted(sources):
+        sources.setdefault((name, version), set()).add(binary_name)
+    packages = []
+    for (name, version), binaries in sorted(sources.items()):
+        binaries = sorted(binaries)
         directory = downloads / name
         directory.mkdir(parents=True, exist_ok=True)
-        run("apt-get", "source", "--download-only", "--only-source", f"{name}={version}", cwd=directory)
+        available = apt_source_versions(name)
+        chosen, substitution = choose_source_version(version, available)
+        if chosen is None:
+            raise RuntimeError(
+                source_unavailable_message(name, binaries, version, available, apt_version_table(binaries))
+            )
+        if substitution:
+            print(f"note: {substitution}", flush=True)
+        fetch_system_source(name, chosen, directory)
         if not list(directory.glob("*.dsc")):
-            raise RuntimeError(f"missing source control file for {name}={version}")
-    return [{"name": name, "version": version} for name, version in sorted(sources)]
+            raise RuntimeError(f"missing source control file for {name}={chosen}")
+        packages.append({"name": name, "version": chosen, "installed_version": version, "binaries": binaries})
+    return packages
 
 
 def make_sources(output, vcpkg, packages, system_sources):

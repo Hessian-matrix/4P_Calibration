@@ -9,6 +9,12 @@ pin the parts a wrong implementation gets wrong silently: a bundle embeds one
 translated ``license.rtf`` per language and only the untranslated one is the notice
 that applies, the manifest's own size/SHA-1 have to be re-checked against the
 payload, and the recorded provenance must not point outside ``VCToolsRedistDir``.
+
+The same applies to the distribution sources of the bundled system libraries: an
+Ubuntu archive keeps only the newest version per pocket, so the runner image's
+installed version can already be gone by packaging time.  The tests pin which
+archived packaging may stand in for it and that an unobtainable source aborts the
+run instead of producing a release without one.
 """
 
 from __future__ import annotations
@@ -314,6 +320,135 @@ class RelocatedSmokeTests(unittest.TestCase):
         leak = self.vcpkg / "installed" / "x64-linux-release" / "lib"
         with self.assertRaises(RuntimeError):
             self.smoke(self.build_archive(f'echo "{leak}"; exit 0\n'))
+
+
+APT_POLICY = (
+    "libexpat1:\n"
+    "  Installed: 2.4.7-1ubuntu0.7\n"
+    "  Candidate: 2.4.7-1ubuntu0.9\n"
+    "  Version table:\n"
+    "     2.4.7-1ubuntu0.9 500\n"
+    "        500 http://azure.archive.ubuntu.com/ubuntu jammy-security/main amd64 Packages\n"
+    "     2.4.7-1 500\n"
+    "        500 http://azure.archive.ubuntu.com/ubuntu jammy/main amd64 Packages\n"
+)
+
+
+class DebianVersionTests(unittest.TestCase):
+    """Debian version identity and ordering, which the source choice is built on."""
+
+    def test_upstream_version_drops_epoch_and_the_last_hyphen_suffix(self):
+        self.assertEqual(release.debian_upstream_version("2.4.7-1ubuntu0.7"), "2.4.7")
+        self.assertEqual(release.debian_upstream_version("1:14.0.0-1ubuntu1.1"), "14.0.0")
+        self.assertEqual(release.debian_upstream_version("4.12.0+dfsg-1"), "4.12.0+dfsg")
+        self.assertEqual(release.debian_upstream_version("2.4.7"), "2.4.7")
+
+    def test_ordering_follows_debian_rules(self):
+        self.assertEqual(release.debian_version_compare("2.4.7-1ubuntu0.7", "2.4.7-1ubuntu0.9"), -1)
+        # Numeric, not lexicographic: the next security revision is 0.10.
+        self.assertEqual(release.debian_version_compare("2.4.7-1ubuntu0.9", "2.4.7-1ubuntu0.10"), -1)
+        self.assertEqual(release.debian_version_compare("1:1.0-1", "2.0-1"), 1)
+        self.assertEqual(release.debian_version_compare("1.0~rc1-1", "1.0-1"), -1)
+        self.assertEqual(release.debian_version_compare("2.4.7-1", "2.4.7-1"), 0)
+
+
+class SystemSourceChoiceTests(unittest.TestCase):
+    """``choose_source_version``: which archived packaging corresponds to a binary."""
+
+    def test_the_installed_version_is_used_while_the_archive_still_has_it(self):
+        self.assertEqual(
+            release.choose_source_version("1.0.9-2build6", ["1.0.9-2build6"]), ("1.0.9-2build6", None)
+        )
+
+    def test_a_replaced_security_packaging_is_replaced_by_the_newest_same_upstream_one(self):
+        chosen, note = release.choose_source_version("2.4.7-1ubuntu0.7", ["2.4.7-1", "2.4.7-1ubuntu0.9"])
+        self.assertEqual(chosen, "2.4.7-1ubuntu0.9")
+        self.assertIn("2.4.7-1ubuntu0.7", note)
+        self.assertIn("2.4.7-1ubuntu0.9", note)
+
+    def test_a_different_upstream_version_is_never_substituted(self):
+        self.assertEqual(release.choose_source_version("2.4.7-1ubuntu0.7", ["2.5.0-1ubuntu1"]), (None, None))
+
+    def test_packaging_older_than_the_installed_binary_is_refused(self):
+        # The binary carries patches this packaging does not have; it cannot stand in.
+        self.assertEqual(release.choose_source_version("2.4.7-1ubuntu0.9", ["2.4.7-1"]), (None, None))
+
+
+class SystemSourcePackagingTests(unittest.TestCase):
+    """``system_licenses_and_sources``: the corresponding source is downloaded, or the run stops."""
+
+    INSTALLED = "2.4.7-1ubuntu0.7"
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="rigcal system source test ")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.bundle = self.root / "bundle"
+        self.bundle.mkdir()
+        self.prefix = self.root / "prefix"
+        self.downloads = self.root / "downloads"
+        (self.bundle / "native-dependencies.json").write_text(
+            json.dumps([{
+                "name": "libexpat.so.1",
+                "source": "system:linux",
+                "bundled": True,
+                "source_path": "/usr/lib/x86_64-linux-gnu/libexpat.so.1.8.1",
+            }]) + "\n",
+            encoding="utf-8",
+        )
+
+    def answer(self, *args, **kwargs):
+        # ``capture`` answers both the dpkg-query question and the diagnostics one.
+        return APT_POLICY if args[0] == "apt-cache" else f"expat\t{self.INSTALLED}"
+
+    def write_download(self, name, version, directory):
+        (directory / f"{name}_{version}.dsc").write_text(
+            f"Format: 3.0 (quilt)\nVersion: {version}\n", encoding="utf-8"
+        )
+
+    def collect(self, available):
+        self.capture = mock.Mock(side_effect=self.answer)
+        self.fetch = mock.Mock(side_effect=self.write_download)
+        with mock.patch.multiple(
+            release,
+            capture=self.capture,
+            apt_source_versions=mock.Mock(return_value=available),
+            fetch_system_source=self.fetch,
+        ), mock.patch.object(release.shutil, "copy2"), mock.patch.object(
+            release.subprocess, "run", mock.Mock(return_value=SimpleNamespace(
+                returncode=0, stdout="libexpat1: /usr/lib/x86_64-linux-gnu/libexpat.so.1.8.1\n"
+            ))
+        ):
+            return release.system_licenses_and_sources(self.bundle, self.prefix, self.downloads)
+
+    def test_replaced_version_downloads_the_newest_same_upstream_packaging(self):
+        packages = self.collect(["2.4.7-1", "2.4.7-1ubuntu0.9"])
+        self.assertEqual(self.fetch.call_args.args, ("expat", "2.4.7-1ubuntu0.9", self.downloads / "expat"))
+        self.assertEqual(packages, [{
+            "name": "expat",
+            "version": "2.4.7-1ubuntu0.9",
+            "installed_version": "2.4.7-1ubuntu0.7",
+            "binaries": ["libexpat1"],
+        }])
+        self.assertTrue((self.downloads / "expat" / "expat_2.4.7-1ubuntu0.9.dsc").is_file())
+
+    def test_the_exact_version_is_downloaded_instead_of_a_substitute(self):
+        packages = self.collect([self.INSTALLED])
+        self.assertEqual(self.fetch.call_args.args[1], self.INSTALLED)
+        self.assertEqual(packages[0]["installed_version"], packages[0]["version"])
+
+    def test_unobtainable_source_names_everything_and_downloads_nothing(self):
+        with self.assertRaises(RuntimeError) as caught:
+            self.collect(["2.5.0-1ubuntu1"])
+        message = str(caught.exception)
+        self.assertIn("libexpat1", message)
+        self.assertIn("source package expat", message)
+        self.assertIn(self.INSTALLED, message)
+        self.assertIn("2.5.0-1ubuntu1", message)
+        # The APT version table is quoted so the packaging log shows the pockets.
+        self.assertIn("jammy-security/main", message)
+        self.fetch.assert_not_called()
+        self.assertEqual(list((self.downloads / "expat").glob("*.dsc")), [])
 
 
 if __name__ == "__main__":
