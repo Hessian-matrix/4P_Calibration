@@ -17,6 +17,12 @@ docs/               见 docs/README.md（运行手册、设备事实）
 local/              现场配置（gitignored）：camera_session.yaml 等
 ```
 
+## 下载可运行的发布包
+
+GitHub Actions 的 `Portable release` 为 **Windows x86_64、Linux x86_64、Linux ARM64（aarch64）** 构建带原生运行库的压缩包。功能分支推送产出预览 artifacts；与工作区版本一致的 `v*` 标签在三平台全部通过后创建 **Release 草稿**。
+
+解压完整目录后，修改 `config/*.example.yaml` 即可运行，不需要安装 Rust、Python 或 OpenCV／FFmpeg 开发包。Linux 要求 glibc ≥2.35；GUI 需要桌面环境与 OpenGL 驱动。下载、校验、启动与发布步骤见 [发布流程](docs/operations.md#14-跨平台发布包与-release-流程)。
+
 ## 构建
 
 使用系统安装的 **OpenCV 4.8+ / 5.x** 与 **FFmpeg 6.x–9.x** 开发库，不固定补丁版本或机器路径。Rust 绑定版本由 `Cargo.lock` 固定。

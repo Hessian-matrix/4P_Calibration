@@ -18,6 +18,7 @@ local/
 target/
 .deps/
 .archive/
+.release/
 
 # macOS 文件元数据
 .DS_Store

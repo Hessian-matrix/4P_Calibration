@@ -1,6 +1,6 @@
 # 运行手册（operations）
 
-默认使用系统开发库，不要求项目专用 `.deps`、兄弟仓库或手工 export。非标准安装仍可显式覆盖绑定库的发现路径。
+源码构建默认使用系统开发库，不要求项目专用 `.deps`、兄弟仓库或手工 export。非标准安装仍可显式覆盖绑定库的发现路径。预编译发布包自带应用所需原生运行库，使用方式见 §1.4。
 
 ## 1. 系统构建环境
 
@@ -50,6 +50,70 @@ target/debug/rigcal-gui --check-deps
 例如使用自定义前缀或 Homebrew 的 keg-only 版本包时，可为该次构建设置 `PKG_CONFIG_PATH=/path/to/prefix/lib/pkgconfig`；如另有搜索路径，用系统路径列表分隔符追加。不要把这类本机值提交到仓库。自定义动态库的运行期查找由系统加载器或用户自己的 rpath 配置负责，仓库不再写死 rpath；改变原生库主/次版本后应重新生成绑定并重新构建。
 
 只覆盖一部分路径可能混入另一套开发库。构建时的头文件、链接时库文件和运行期库必须来自兼容版本；编译通过不替代 `--check-deps` 与实际采集/标定验收。
+
+### 1.4 跨平台发布包与 Release 流程
+
+工作流：`.github/workflows/release.yml`（GitHub Actions → **Portable release**）。ARM 指 **64 位 ARM／aarch64**，不包含 32 位 armhf 或 musl/Alpine。
+
+| 产物后缀 | 原生构建 Runner | 最低运行环境 |
+|---|---|---|
+| `windows-x86_64.zip` | `windows-2022` | Windows 10/11 x64；包内含 VC++ app-local 运行库 |
+| `linux-x86_64.tar.gz` | `ubuntu-22.04` | x86_64，glibc ≥2.35 |
+| `linux-aarch64.tar.gz` | `ubuntu-22.04-arm` | ARM64，glibc ≥2.35 |
+
+GUI 在两平台都需要桌面环境与可用的 OpenGL 驱动；Linux 支持 X11／Wayland。无桌面设备可运行 CLI 或角点重算，但不能启动 GUI。glibc、系统动态加载器、Windows 系统 DLL 和 GPU 厂商驱动由操作系统提供，不随包替换。
+
+**如何触发**：
+
+1. 推送 `feat-4p-calib-rust` 上的代码、锁文件或发布脚本改动，会构建预览包，不创建 Release。到该次 Actions 运行的 **Artifacts** 下载 `bundle-*`；其内才是平台压缩包及 SHA-256 校验文件。预览名包含提交 SHA，保留 14 天。
+2. 也可从 Actions 手动运行 `workflow_dispatch`。如果工作流尚未进入默认分支而界面没有该按钮，直接推送功能分支即可触发预览，无需先向 `main` 提交。
+3. 正式发布先确认版本：`Cargo.toml` 的 `workspace.package.version` 与 `Cargo.lock` 中工作区包版本应同步。标签必须恰好为 `v<version>`，不一致立即失败。
+
+当前版本的示例命令（在功能分支执行，推送标签才触发正式构建）：
+
+```bash
+git switch feat-4p-calib-rust
+git push origin feat-4p-calib-rust
+# 确认预览构建通过后：
+git tag -a v0.1.0 -m "4P calibration 0.1.0"
+git push origin v0.1.0
+```
+
+三平台全部完成后，工作流核验六个归档的 SHA-256，创建 **Draft Release**，上传三个运行包、三个对应的 `*-sources.tar.gz` 及汇总 `SHA256SUMS.txt`。维护者检查产物和许可后再手动发布；工作流不覆盖已存在的 Release，不自动向 `main` 提交或推送。
+
+**解压与启动**：
+
+```bash
+# Linux：在下载目录先校验，再解压对应架构运行包（不是 *-sources.tar.gz）
+sha256sum --check SHA256SUMS.txt --ignore-missing
+tar -xzf rigcal-0.1.0-linux-x86_64.tar.gz
+cd rigcal-0.1.0-linux-x86_64
+./rigcal-gui --config config/rig.example.yaml
+# 或单相机 CLI
+./rigcal-camera --config config/camera.example.yaml --live
+```
+
+```powershell
+# Windows PowerShell：与 SHA256SUMS.txt 对照，随后解压并进入包目录
+Get-FileHash .\rigcal-0.1.0-windows-x86_64.zip -Algorithm SHA256
+Expand-Archive .\rigcal-0.1.0-windows-x86_64.zip -DestinationPath .
+Set-Location .\rigcal-0.1.0-windows-x86_64
+.\rigcal-gui.exe --config config/rig.example.yaml
+```
+
+先按实际设备核对 `config/` 示例中的 IP、raw 端口、画布尺寸与标定板实测几何。示例默认设备 `10.21.12.162`、raw `30432`；**示例不证明你的板尺寸或设备配置正确**。完整保留 EXE/DLL 或 Linux `lib/`，不要只拷贝单个可执行文件。原生 KB4/DS 不依赖 Python；发布包不带显式可选的 SciPy 对拍后端。
+
+`--help` 不连接相机。`--check-deps` 的完整链接诊断另需系统工具：Linux `ldd`、Windows `dumpbin`；后者属于开发工具，**不是正常运行的必需项，也不随包分发**。
+
+**构建与准入边界**：
+
+- 普通源码构建仍自动发现系统库；只有 Release CI 使用 `tools/release/vcpkg.json` 的固定 baseline 与 `triplets/`。当前原生版本为 OpenCV 4.12.0、FFmpeg 9.0.2，动态链接、仅 release，不启用 FFmpeg GPL/nonfree 扩展。Rust 工具链取工作区声明的最低版本，依赖使用 `Cargo.lock`。
+- 每平台执行 `cargo build/test/clippy --locked --release`，测试或告警失败则不发布。打包检查传递依赖、架构、同名冲突和必要的动态加载库；Linux 使用包内相对 RPATH，Windows 使用 app-local DLL。
+- 归档完成后临时隐藏 vcpkg 安装目录、移除其运行时搜索路径，将包解压到另一个**含空格**的目录，并运行两个入口的 `--help` 与 `--check-deps`。这验证启动及依赖加载，不等于已验证 GUI 渲染、真机采集或标定精度。
+- `build-info.json` 记录提交、目标、Rust/vcpkg 版本；`native-dependencies.json` 记录原生库来源。`LICENSES/` 包含原生及 Rust 依赖声明；源码归档包含本项目、解析到的 Rust 依赖、vcpkg 打补丁后的原生源码和构建脚本，以及随包系统库对应的发行版源码。缺少必需源码或版权文件会中止打包。
+- 原生缓存同时保留安装树和对应源码；调整原生依赖或 triplet 会生成新缓存键。不要手工只缓存 DLL／`.so` 而丢弃源码。
+
+**发布许可需要维护者确认**：本项目当前声明 `UNLICENSED`，工作流不会替作者授予分发许可。Slint 有多种许可选择，其 royalty-free desktop 条款不覆盖嵌入式系统；ARM64 产物的存在不代表自动取得嵌入式部署授权。Release 草稿附有 Slint 署名徽章，但徽章不替代许可选择。核对项目、Slint、FFmpeg 等依赖的适用许可后再公开发布。
 
 ## 2. 现场检查清单（只读，先跑这个）
 

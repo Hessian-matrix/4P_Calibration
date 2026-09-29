@@ -1,0 +1,18 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "rigcal-release-native",
+  "version-string": "1",
+  "builtin-baseline": "58845ed63eb19aff55e896ea1f5d51f2a0df5b66",
+  "dependencies": [
+    {
+      "name": "opencv4",
+      "default-features": false,
+      "features": ["calib3d", "dnn", "jpeg", "png", "thread"]
+    },
+    {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": ["avcodec", "avformat", "swscale"]
+    }
+  ]
+}
