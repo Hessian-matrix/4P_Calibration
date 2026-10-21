@@ -1,0 +1,1776 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>相机标定 · 结果审查</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body { margin: 0; background: #0b1220; color: #e2e8f0; font: 14px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; min-height: 100vh; display: flex; flex-direction: column; }
+header { padding: 18px 24px; border-bottom: 1px solid #273449; flex: none; }
+h1 { font-size: 22px; margin: 0 0 4px; font-weight: 650; }
+h2 { font-size: 15px; margin: 22px 0 8px; color: #cbd5e1; font-weight: 650; }
+h3 { font-size: 13px; margin: 0 0 4px; color: #e2e8f0; font-weight: 650; }
+p { color: #94a3b8; margin: 4px 0; }
+main { display: grid; grid-template-columns: minmax(0, 1fr) 410px; flex: 1 1 auto; min-height: 0; }
+#stage { display: flex; flex-direction: column; min-width: 0; min-height: 0; border-right: 1px solid #273449; }
+.canvas-wrap { position: relative; flex: 1; min-height: min(540px, 58vh); }
+canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: grab; }
+.canvas-badge { position: absolute; left: 12px; top: 12px; max-width: calc(100% - 24px); padding: 5px 9px; border: 1px solid #334155; border-radius: 6px; background: rgba(15, 23, 42, 0.82); color: #cbd5e1; font-size: 12px; pointer-events: none; }
+.time-colorbar { position: absolute; right: 12px; bottom: 12px; width: min(300px, calc(100% - 24px)); padding: 6px 10px 5px; border: 1px solid #334155; border-radius: 6px; background: rgba(15, 23, 42, 0.86); color: #cbd5e1; font-size: 11px; pointer-events: none; }
+.time-colorbar-head { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 5px; color: #94a3b8; }
+.time-colorbar-track { position: relative; height: 8px; border-radius: 999px; background: linear-gradient(to right, rgb(37, 99, 235) 0%, rgb(34, 211, 238) 34%, rgb(250, 204, 21) 67%, rgb(239, 68, 68) 100%); }
+.time-colorbar-cursor { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; border-radius: 2px; background: #e2e8f0; }
+.time-colorbar-ticks { display: flex; justify-content: space-between; margin-top: 3px; color: #94a3b8; }
+.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 12px; border-top: 1px solid #273449; background: #0f172a; }
+.controls .group { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.controls .grow { flex: 1 1 220px; min-width: 160px; display: flex; align-items: center; gap: 8px; }
+button { background: #22324c; color: #e2e8f0; border: 1px solid #405674; border-radius: 6px; padding: 7px 12px; cursor: pointer; font: inherit; }
+button:hover { background: #2b3f5e; }
+button[aria-pressed="true"], button.active { background: #365b8c; border-color: #6b9fe0; }
+button:disabled { opacity: 0.42; cursor: not-allowed; }
+input[type="range"] { flex: 1; min-width: 120px; accent-color: #f59e0b; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+aside { padding: 18px 20px 40px; background: #111b2c; min-height: 0; overflow: auto; }
+.badge { display: inline-block; padding: 3px 9px; border-radius: 999px; border: 1px solid #475569; background: #1e293b; color: #cbd5e1; font-size: 12px; margin-bottom: 6px; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; font-variant-numeric: tabular-nums; }
+th, td { padding: 6px 5px; border-bottom: 1px solid #253247; text-align: right; vertical-align: top; }
+th:first-child, td:first-child { text-align: left; }
+th { color: #94a3b8; font-weight: 600; }
+td.num { font-variant-numeric: tabular-nums; }
+.legend { margin-top: 12px; color: #94a3b8; font-size: 12px; line-height: 1.8; }
+.legend .x { color: #ef4444; }
+.legend .y { color: #22c55e; }
+.legend .z { color: #3b82f6; }
+.camera-card { border: 1px solid #273449; border-radius: 8px; padding: 9px 10px; margin: 8px 0; background: #0f172a; }
+.camera-card .title { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px; align-items: baseline; }
+.camera-card .model { color: #94a3b8; font-size: 12px; }
+.camera-card .size { color: #94a3b8; font-size: 12px; }
+.camera-card table { margin-top: 4px; }
+.camera-card th, .camera-card td { padding: 3px 4px; border-bottom: 1px solid #1e2a3d; }
+.note { color: #94a3b8; font-size: 12px; }
+.warn { color: #fbbf24; }
+.matrix { border-collapse: collapse; width: auto; margin: 4px 0; font-size: 12px; }
+.matrix td, .matrix th { border: 1px solid #273449; padding: 3px 7px; text-align: right; }
+.matrix th { color: #94a3b8; }
+.convention { color: #cbd5e1; font-size: 12px; line-height: 1.9; }
+.convention code { color: #e2e8f0; background: #1e293b; padding: 1px 4px; border-radius: 4px; }
+.trajectory-meta { font-size: 12px; color: #94a3b8; word-break: break-word; }
+.time-readout { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px; font-size: 12px; color: #94a3b8; }
+.pose-grid { margin-top: 6px; }
+.pose-grid td:first-child { color: #94a3b8; width: 30%; }
+.lines { white-space: pre-line; }
+[hidden] { display: none !important; }
+@media (min-width: 981px) {
+  body { height: 100vh; overflow: hidden; }
+}
+@media (max-width: 980px) {
+  body { height: auto; overflow: visible; }
+  main { grid-template-columns: 1fr; flex: none; }
+  #stage { border-right: 0; }
+  .canvas-wrap { min-height: 58vh; }
+  aside { border-top: 1px solid #273449; overflow: visible; }
+}
+@media (max-width: 600px) {
+  header { padding: 14px; }
+  aside { padding: 14px; }
+  .canvas-wrap { min-height: 50vh; }
+  h1 { font-size: 19px; }
+  button { padding: 6px 9px; }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>相机标定 · 结果审查</h1>
+  <p id="dataset-line"></p>
+  <p id="reference-line"></p>
+</header>
+
+<main>
+  <section id="stage" aria-label="标定结果三维视图">
+    <div class="canvas-wrap">
+      <canvas aria-label="相机外参、标定板与求解轨迹交互式三维视图"></canvas>
+      <div class="canvas-badge" id="scene-badge"></div>
+      <div class="time-colorbar" id="time-colorbar" hidden>
+        <div class="time-colorbar-head"><span>轨迹时间色标（s，按真实 time_s 归一化）</span><span class="mono" id="colorbar-current"></span></div>
+        <div class="time-colorbar-track"><span class="time-colorbar-cursor" id="colorbar-cursor" style="left:0%"></span></div>
+        <div class="time-colorbar-ticks mono" id="colorbar-ticks"></div>
+      </div>
+    </div>
+    <div class="controls">
+      <div class="group" role="group" aria-label="视图模式">
+        <button type="button" id="mode-static" aria-pressed="false">静态构型</button>
+        <button type="button" id="mode-trajectory" aria-pressed="false">求解轨迹</button>
+      </div>
+      <div class="group" role="group" aria-label="观察方向">
+        <button type="button" data-view="xy">XY</button>
+        <button type="button" data-view="xz">XZ</button>
+        <button type="button" data-view="yz">YZ</button>
+        <button type="button" id="fit">适配视图</button>
+        <button type="button" id="reset">复位</button>
+      </div>
+      <div class="group trajectory-only" id="playback-controls">
+        <button type="button" id="play" aria-pressed="false">播放</button>
+        <div class="grow">
+          <input type="range" id="time-slider" aria-label="轨迹时间" min="0" max="1" step="any" value="0">
+          <span class="mono" id="time-label" style="font-size:12px;color:#94a3b8;white-space:nowrap"></span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <aside>
+    <div class="badge" id="acceptance-badge">审核状态</div>
+    <p class="note">拖动旋转，滚轮缩放，Shift + 拖动平移。静态构型以毫米显示；求解轨迹以米显示。</p>
+
+    <div class="legend">
+      <span class="x">■ X 轴</span>　<span class="y">■ Y 轴</span>　<span class="z">■ Z 轴</span><br>
+      坐标轴为真实存储坐标系，未按重力旋转。相机线框仅示意相机局部 +Z 光轴方向，<b>不是相机模型的真实视场</b>。<br>
+      求解轨迹：线宽 1 px，颜色按真实时间戳 <code>time_s</code> 归一化——<b>蓝</b>最早 → <b>青</b> → <b>黄</b> → <b>红</b>最晚（不是采样序号）；当前位姿的轨迹刚体坐标轴保持加粗。<br>
+      标定板：严格按运行配置的 tag 尺寸、间距和 ID 排列绘制，与轨迹共用米制尺度。填充区域仅为 <b>Tag 图案区域</b>，不包含未配置的板外白边，不绘制 tag 位图编码。原点 <b>O</b> 位于首个 Tag 的第一个几何角点，不在板中心。
+    </div>
+    <p class="note" id="board-note"></p>
+
+    <h2>选中的位姿</h2>
+    <div id="pose-panel">
+      <p id="pose-status" class="note"></p>
+      <table class="pose-grid" id="pose-table" hidden>
+        <tbody>
+          <tr><td>相对时间</td><td class="mono" id="pose-time"></td></tr>
+          <tr><td>平移 t（m）</td><td class="mono" id="pose-position"></td></tr>
+          <tr><td>旋转矩阵 R（行）</td><td class="mono lines" id="pose-rotation"></td></tr>
+          <tr><td>四元数 w,x,y,z</td><td class="mono" id="pose-quaternion"></td></tr>
+        </tbody>
+      </table>
+      <h3 id="pose-sensors-title" hidden>刚体在当前位姿下的传感器位置（m）</h3>
+      <table id="pose-sensors" hidden>
+        <thead><tr><th>传感器</th><th>X</th><th>Y</th><th>Z</th></tr></thead>
+        <tbody id="pose-sensor-rows"></tbody>
+      </table>
+      <p class="note" id="pose-sensor-note" hidden></p>
+    </div>
+
+    <h2>静态构型 · 相机中心</h2>
+    <p class="note" id="static-reference"></p>
+    <table>
+      <thead><tr><th>传感器</th><th>X</th><th>Y</th><th>Z</th></tr></thead>
+      <tbody id="static-positions"></tbody>
+    </table>
+    <p class="note">单位 mm。位置为相机中心 C = −Rᵀt；参考传感器位于原点。</p>
+
+    <h2>轨迹与时间约定</h2>
+    <p class="trajectory-meta" id="trajectory-meta"></p>
+    <div class="convention" id="trajectory-conventions"></div>
+
+    <h2>相机内参</h2>
+    <div id="camera-parameters"></div>
+
+    <h2>残余与收敛</h2>
+    <div id="residual-content"></div>
+
+    <h2>IMU 参数</h2>
+    <div id="inertial-content"></div>
+
+    <h2>变换约定</h2>
+    <div class="convention">
+      静态视图中的外参方向为 <code>T_cam_from_ref</code>：<code>p_cam = R · p_ref + t</code>；相机中心 <code>C_ref = −Rᵀ · t</code>。这里的 ref 即上方“静态参考系”；含 IMU 时该参考系为 IMU，结果方向名为 <code>T_cam_from_imu</code>。<br>
+      求解轨迹为 <code>T_frame_from_body</code>：<code>p_frame = R · p_body + t</code>，旋转矩阵按行主序存储。<br>
+      合成传感器位姿：<code>T_frame_from_sensor = T_frame_from_body · T_body_from_sensor</code>。<br>
+      四元数顺序为 <code>w, x, y, z</code>，与结果文件一致。
+    </div>
+  </aside>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  var D = __DATA__;
+
+  var AXIS_COLORS = ["#ef4444", "#22c55e", "#3b82f6"];
+  var SENSOR_COLORS = ["#f59e0b", "#a78bfa", "#22d3ee", "#f472b6", "#84cc16", "#fb7185"];
+  var IDENTITY_ROTATION = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+  // Trajectory time ramp: early blue -> cyan -> yellow -> late red. The same stops
+  // are mirrored by the CSS gradient of the on-canvas time colorbar.
+  var TIME_RAMP = [
+    { at: 0, color: [37, 99, 235] },
+    { at: 0.34, color: [34, 211, 238] },
+    { at: 0.67, color: [250, 204, 21] },
+    { at: 1, color: [239, 68, 68] }
+  ];
+  var BOARD_SURFACE = "rgba(148, 163, 184, 0.12)";
+  var BOARD_OUTLINE = "#94a3b8";
+  var BOARD_TAG = "#cbd5e1";
+
+  var state = {
+    mode: "static",
+    view: { center: [0, 0, 0], span: 1000, az: -0.5, el: 0.42, zoom: 1, pan: [0, 0] },
+    calibration: D.calibration || null,
+    summary: D.summary || null,
+    poses: Array.isArray(D.poses) ? D.poses : [],
+    trajectory: readTrajectory(D.trajectory),
+    board: readBoard(D.board),
+    rig: null,
+    currentTime: 0,
+    drag: null,
+    playing: false,
+    playAnchorWall: 0,
+    playAnchorTime: 0,
+    animationFrame: 0
+  };
+
+  var canvas = document.querySelector("canvas");
+  var ctx = canvas.getContext("2d");
+  var W = 0;
+  var H = 0;
+  var sensorRows = [];
+  var timeBarSignature = "";
+
+  // ---------------------------------------------------------------- numbers
+
+  function trimFixed(text) {
+    if (text.indexOf(".") < 0) return text;
+    return text.replace(/0+$/, "").replace(/\.$/, "");
+  }
+
+  function formatValue(value, significant) {
+    if (typeof value !== "number" || !Number.isFinite(value)) return "—";
+    if (value === 0) return "0";
+    var digits = significant === undefined ? 6 : significant;
+    var magnitude = Math.abs(value);
+    if (magnitude >= 1e-3 && magnitude < 1e6) {
+      var decimals = Math.max(0, digits - 1 - Math.floor(Math.log10(magnitude)));
+      return trimFixed(value.toFixed(Math.min(9, decimals)));
+    }
+    return value.toExponential(Math.max(1, digits - 1));
+  }
+
+  function formatFixed(value, digits) {
+    if (typeof value !== "number" || !Number.isFinite(value)) return "—";
+    return trimFixed(value.toFixed(digits));
+  }
+
+  function formatCost(value) {
+    if (typeof value !== "number" || !Number.isFinite(value)) return "—";
+    if (value === 0) return "0";
+    var magnitude = Math.abs(value);
+    if (magnitude >= 1e4 || magnitude < 1e-3) return value.toExponential(4);
+    return formatValue(value, 6);
+  }
+
+  function finiteNumber(value) {
+    return typeof value === "number" && Number.isFinite(value);
+  }
+
+  function finiteVector(value, length) {
+    return Array.isArray(value) && value.length === length && value.every(finiteNumber);
+  }
+
+  function finiteMatrix(value) {
+    return Array.isArray(value) && value.length === 3 && value.every(function (row) {
+      return finiteVector(row, 3);
+    });
+  }
+
+  function vectorText(values, significant) {
+    return "[" + values.map(function (value) { return formatValue(value, significant); }).join(", ") + "]";
+  }
+
+  // Maps a normalized time fraction to the trajectory ramp color.
+  function rampColor(fraction) {
+    var t = Math.min(1, Math.max(0, finiteNumber(fraction) ? fraction : 0));
+    for (var i = 1; i < TIME_RAMP.length; i += 1) {
+      var after = TIME_RAMP[i];
+      if (t > after.at) continue;
+      var before = TIME_RAMP[i - 1];
+      var width = after.at - before.at;
+      var k = width > 0 ? (t - before.at) / width : 0;
+      return "rgb(" +
+        Math.round(before.color[0] + (after.color[0] - before.color[0]) * k) + ", " +
+        Math.round(before.color[1] + (after.color[1] - before.color[1]) * k) + ", " +
+        Math.round(before.color[2] + (after.color[2] - before.color[2]) * k) + ")";
+    }
+    return "rgb(239, 68, 68)";
+  }
+
+  // ------------------------------------------------------------- geometry
+
+  function subtractVector(a, b) {
+    return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+  }
+
+  function scaleVector(v, factor) {
+    return [v[0] * factor, v[1] * factor, v[2] * factor];
+  }
+
+  function dotVector(a, b) {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  }
+
+  function unitVector(v) {
+    var length = Math.hypot(v[0], v[1], v[2]);
+    if (!(length > 0) || !Number.isFinite(length)) return null;
+    return [v[0] / length, v[1] / length, v[2] / length];
+  }
+
+  function multiplyMatrix(a, b) {
+    var out = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    for (var i = 0; i < 3; i += 1) {
+      for (var j = 0; j < 3; j += 1) {
+        out[i][j] = a[i][0] * b[0][j] + a[i][1] * b[1][j] + a[i][2] * b[2][j];
+      }
+    }
+    return out;
+  }
+
+
+  function multiplyVector(m, v) {
+    return [
+      m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
+      m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
+      m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2]
+    ];
+  }
+
+  function addVector(a, b) {
+    return [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+  }
+
+
+  function composePose(a, b) {
+    return {
+      rotation: multiplyMatrix(a.rotation, b.rotation),
+      translation: addVector(a.translation, multiplyVector(a.rotation, b.translation))
+    };
+  }
+
+
+  // Matches the quaternion-to-rotation formula used by the result writer.
+  function rotationFromQuaternion(quaternion) {
+    var norm = Math.hypot(quaternion[0], quaternion[1], quaternion[2], quaternion[3]);
+    if (!(norm > 0) || !Number.isFinite(norm)) return IDENTITY_ROTATION;
+    var w = quaternion[0] / norm;
+    var x = quaternion[1] / norm;
+    var y = quaternion[2] / norm;
+    var z = quaternion[3] / norm;
+    return [
+      [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+      [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+      [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]
+    ];
+  }
+
+  function quaternionFromRotation(m) {
+    var trace = m[0][0] + m[1][1] + m[2][2];
+    var w;
+    var x;
+    var y;
+    var z;
+    if (trace > 0) {
+      var s = Math.sqrt(trace + 1) * 2;
+      w = 0.25 * s;
+      x = (m[2][1] - m[1][2]) / s;
+      y = (m[0][2] - m[2][0]) / s;
+      z = (m[1][0] - m[0][1]) / s;
+    } else if (m[0][0] > m[1][1] && m[0][0] > m[2][2]) {
+      var sx = Math.sqrt(1 + m[0][0] - m[1][1] - m[2][2]) * 2;
+      w = (m[2][1] - m[1][2]) / sx;
+      x = 0.25 * sx;
+      y = (m[0][1] + m[1][0]) / sx;
+      z = (m[0][2] + m[2][0]) / sx;
+    } else if (m[1][1] > m[2][2]) {
+      var sy = Math.sqrt(1 + m[1][1] - m[0][0] - m[2][2]) * 2;
+      w = (m[0][2] - m[2][0]) / sy;
+      x = (m[0][1] + m[1][0]) / sy;
+      y = 0.25 * sy;
+      z = (m[1][2] + m[2][1]) / sy;
+    } else {
+      var sz = Math.sqrt(1 + m[2][2] - m[0][0] - m[1][1]) * 2;
+      w = (m[1][0] - m[0][1]) / sz;
+      x = (m[0][2] + m[2][0]) / sz;
+      y = (m[1][2] + m[2][1]) / sz;
+      z = 0.25 * sz;
+    }
+    return normalizeQuaternion([w, x, y, z]);
+  }
+
+  function normalizeQuaternion(q) {
+    var norm = Math.hypot(q[0], q[1], q[2], q[3]);
+    if (!(norm > 0) || !Number.isFinite(norm)) return [1, 0, 0, 0];
+    return [q[0] / norm, q[1] / norm, q[2] / norm, q[3] / norm];
+  }
+
+  function slerpQuaternion(a, b, fraction) {
+    var dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+    var target = b;
+    if (dot < 0) {
+      dot = -dot;
+      target = [-b[0], -b[1], -b[2], -b[3]];
+    }
+    if (dot > 0.9995) {
+      return normalizeQuaternion([
+        a[0] + (target[0] - a[0]) * fraction,
+        a[1] + (target[1] - a[1]) * fraction,
+        a[2] + (target[2] - a[2]) * fraction,
+        a[3] + (target[3] - a[3]) * fraction
+      ]);
+    }
+    var theta = Math.acos(Math.min(1, Math.max(-1, dot)));
+    var sine = Math.sin(theta);
+    var first = Math.sin((1 - fraction) * theta) / sine;
+    var second = Math.sin(fraction * theta) / sine;
+    return normalizeQuaternion([
+      a[0] * first + target[0] * second,
+      a[1] * first + target[1] * second,
+      a[2] * first + target[2] * second,
+      a[3] * first + target[3] * second
+    ]);
+  }
+
+  // ------------------------------------------------------------ trajectory
+
+  function readTrajectory(raw) {
+    if (!raw) {
+      return { available: false, reason: "本次结果未嵌入 trajectory.json；静态构型仍可用。" };
+    }
+    if (raw.schema_version !== 1) {
+      return { available: false, reason: "轨迹 schema_version 不是 1，拒绝按当前约定解释。" };
+    }
+    if (typeof raw.frame !== "string" || raw.frame.length === 0) {
+      return { available: false, reason: "轨迹缺少 frame 声明。" };
+    }
+    if (typeof raw.body_frame !== "string" || raw.body_frame.length === 0) {
+      return { available: false, reason: "轨迹缺少 body_frame 声明。" };
+    }
+    if (typeof raw.time_basis !== "string" || raw.time_basis.length === 0) {
+      return { available: false, reason: "轨迹缺少 time_basis 声明。" };
+    }
+    if (typeof raw.time_origin_ns !== "string" || raw.time_origin_ns.length === 0) {
+      return { available: false, reason: "轨迹缺少 time_origin_ns 字符串。" };
+    }
+    if (!Array.isArray(raw.samples) || raw.samples.length === 0) {
+      return { available: false, reason: "轨迹没有采样点。" };
+    }
+    var samples = [];
+    var previous = -Infinity;
+    var low = [Infinity, Infinity, Infinity];
+    var high = [-Infinity, -Infinity, -Infinity];
+    for (var i = 0; i < raw.samples.length; i += 1) {
+      var sample = raw.samples[i];
+      if (!sample || !finiteNumber(sample.time_s)) {
+        return { available: false, reason: "轨迹第 " + i + " 个采样时间无效。" };
+      }
+      if (!(sample.time_s > previous)) {
+        return { available: false, reason: "轨迹时间戳非严格递增（第 " + i + " 个采样）。" };
+      }
+      if (!finiteVector(sample.position_m, 3)) {
+        return { available: false, reason: "轨迹第 " + i + " 个位置无效。" };
+      }
+      if (!finiteMatrix(sample.rotation)) {
+        return { available: false, reason: "轨迹第 " + i + " 个旋转矩阵无效。" };
+      }
+      for (var axis = 0; axis < 3; axis += 1) {
+        low[axis] = Math.min(low[axis], sample.position_m[axis]);
+        high[axis] = Math.max(high[axis], sample.position_m[axis]);
+      }
+      samples.push({
+        time: sample.time_s,
+        position: sample.position_m.slice(),
+        rotation: sample.rotation.map(function (row) { return row.slice(); }),
+        quaternion: quaternionFromRotation(sample.rotation)
+      });
+      previous = sample.time_s;
+    }
+
+    // Build the drawn path once. Long recordings are decimated for stroke
+    // performance; every sample still drives time, interpolation, and readouts.
+    var stride = Math.max(1, Math.ceil(samples.length / 5000));
+    var start = samples[0].time;
+    var end = samples[samples.length - 1].time;
+    var duration = end - start;
+    var pathSegments = [];
+    var fitPoints = [samples[0].position];
+    var minZ = samples[0].position[2];
+    var pathPrevious = samples[0].position;
+    for (var s = 1; s < samples.length; s += 1) {
+      minZ = Math.min(minZ, samples[s].position[2]);
+      if (s % stride !== 0 && s !== samples.length - 1) continue;
+      // The ramp is keyed to the actual sample timestamps, so uneven sampling
+      // still places each color at the fraction of elapsed time it belongs to.
+      var fraction = duration > 0 ? (samples[s].time - start) / duration : 0;
+      pathSegments.push({
+        a: pathPrevious,
+        b: samples[s].position,
+        color: rampColor(fraction),
+        width: 1
+      });
+      fitPoints.push(samples[s].position);
+      pathPrevious = samples[s].position;
+    }
+    var extent = Math.max(high[0] - low[0], high[1] - low[1], high[2] - low[2]);
+    return {
+      available: true,
+      frame: raw.frame,
+      bodyFrame: raw.body_frame,
+      timeBasis: raw.time_basis,
+      timeOriginNs: raw.time_origin_ns,
+      samples: samples,
+      start: start,
+      end: end,
+      pathSegments: pathSegments,
+      fitPoints: fitPoints,
+      minZ: minZ,
+      bounds: {
+        center: [(low[0] + high[0]) / 2, (low[1] + high[1]) / 2, (low[2] + high[2]) / 2],
+        span: Math.max(0.05, extent * 1.2)
+      }
+    };
+  }
+
+  // ---------------------------------------------------------------- board
+
+  // The exporter emits the actual solver target geometry: four coplanar tag
+  // corners in metres, ordered (0,0), (s,0), (s,s), (0,s) in the board plane.
+  // The board rectangle is derived from those corners, never from tag bit data.
+  function readBoard(raw) {
+    if (!raw) {
+      return { available: false, reason: "本次结果未导出标定板几何。" };
+    }
+    if (typeof raw.frame !== "string" || raw.frame.length === 0) {
+      return { available: false, reason: "标定板缺少 frame 声明。" };
+    }
+    if (!Array.isArray(raw.tags) || raw.tags.length === 0) {
+      return { available: false, reason: "标定板没有 tag 几何。" };
+    }
+    var tags = [];
+    for (var i = 0; i < raw.tags.length; i += 1) {
+      var tag = raw.tags[i];
+      if (!tag || !finiteNumber(tag.id)) {
+        return { available: false, reason: "标定板第 " + i + " 个 tag 的 ID 无效。" };
+      }
+      if (!Array.isArray(tag.corners_m) || tag.corners_m.length !== 4 ||
+          !tag.corners_m.every(function (corner) { return finiteVector(corner, 3); })) {
+        return { available: false, reason: "标定板 tag " + tag.id + " 的四角坐标无效。" };
+      }
+      var corners = tag.corners_m.map(function (corner) { return corner.slice(); });
+      var center = [0, 0, 0];
+      for (var c = 0; c < 4; c += 1) center = addVector(center, scaleVector(corners[c], 0.25));
+      tags.push({ id: tag.id, corners: corners, center: center });
+    }
+
+    // Every AprilGrid tag shares the same in-plane orientation, so the first
+    // tag's edges give the board basis; min/max projections then bound the board.
+    var origin = tags[0].corners[0];
+    var u = unitVector(subtractVector(tags[0].corners[1], origin));
+    var v = unitVector(subtractVector(tags[0].corners[3], origin));
+    var outline = null;
+    if (u && v) {
+      var minU = Infinity;
+      var maxU = -Infinity;
+      var minV = Infinity;
+      var maxV = -Infinity;
+      for (var t = 0; t < tags.length; t += 1) {
+        for (var k = 0; k < 4; k += 1) {
+          var offset = subtractVector(tags[t].corners[k], origin);
+          var alongU = dotVector(offset, u);
+          var alongV = dotVector(offset, v);
+          minU = Math.min(minU, alongU);
+          maxU = Math.max(maxU, alongU);
+          minV = Math.min(minV, alongV);
+          maxV = Math.max(maxV, alongV);
+        }
+      }
+      if (maxU > minU && maxV > minV) {
+        outline = [
+          addVector(addVector(origin, scaleVector(u, minU)), scaleVector(v, minV)),
+          addVector(addVector(origin, scaleVector(u, maxU)), scaleVector(v, minV)),
+          addVector(addVector(origin, scaleVector(u, maxU)), scaleVector(v, maxV)),
+          addVector(addVector(origin, scaleVector(u, minU)), scaleVector(v, maxV))
+        ];
+      }
+    }
+    return {
+      available: true,
+      frame: raw.frame,
+      tags: tags,
+      origin: origin,
+      outline: outline,
+      gapSquares: Array.isArray(raw.gap_squares_m) ? raw.gap_squares_m : [],
+      reason: null
+    };
+  }
+
+  function sampleIndexAtOrAfter(time) {
+    var samples = state.trajectory.samples;
+    var low = 0;
+    var high = samples.length - 1;
+    while (low < high) {
+      var middle = (low + high) >> 1;
+      if (samples[middle].time < time) low = middle + 1;
+      else high = middle;
+    }
+    return low;
+  }
+
+  function poseAtTime(time) {
+    var trajectory = state.trajectory;
+    var samples = trajectory.samples;
+    if (time <= trajectory.start) {
+      var first = samples[0];
+      return { position: first.position.slice(), rotation: first.rotation, quaternion: first.quaternion };
+    }
+    if (time >= trajectory.end) {
+      var last = samples[samples.length - 1];
+      return { position: last.position.slice(), rotation: last.rotation, quaternion: last.quaternion };
+    }
+    var index = sampleIndexAtOrAfter(time);
+    var after = samples[index];
+    if (after.time === time) {
+      return { position: after.position.slice(), rotation: after.rotation, quaternion: after.quaternion };
+    }
+    var before = samples[index - 1];
+    var fraction = (time - before.time) / (after.time - before.time);
+    var quaternion = slerpQuaternion(before.quaternion, after.quaternion, fraction);
+    return {
+      position: [
+        before.position[0] + (after.position[0] - before.position[0]) * fraction,
+        before.position[1] + (after.position[1] - before.position[1]) * fraction,
+        before.position[2] + (after.position[2] - before.position[2]) * fraction
+      ],
+      rotation: rotationFromQuaternion(quaternion),
+      quaternion: quaternion
+    };
+  }
+
+  // ------------------------------------------------------------------- rig
+
+
+  function buildRig() {
+    // Export already provides T_reference_from_camera for both scene modes.
+    // Use that one representation rather than re-decoding the calibration transforms.
+    var body = { kind: D.has_imu ? "imu" : "camera", id: D.reference, label: D.reference };
+    if (state.trajectory.available && state.trajectory.bodyFrame !== body.id) {
+      return { body: null, sensors: [], note: "轨迹刚体与外参参考系不一致，不能合成传感器位姿。" };
+    }
+    return {
+      body: body,
+      note: null,
+      sensors: state.poses.map(function (pose, index) {
+        return {
+          id: pose.id,
+          rotation: pose.rotation,
+          translation: pose.position_mm.map(function (value) { return value / 1000; }),
+          color: SENSOR_COLORS[index % SENSOR_COLORS.length],
+          isBody: !D.has_imu && pose.id === body.id
+        };
+      })
+    };
+  }
+
+  // ------------------------------------------------------------------- DOM
+
+  function element(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  function appendCell(row, text, className) {
+    var cell = element("td", className || "num", text);
+    row.append(cell);
+    return cell;
+  }
+
+  function clear(node) {
+    while (node.firstChild) node.removeChild(node.firstChild);
+  }
+
+  function setText(id, text) {
+    var node = document.getElementById(id);
+    if (node) node.textContent = text;
+  }
+
+  function acceptanceLabel(value) {
+    if (value === "accepted") return "已接受";
+    if (value === "rejected") return "已拒绝";
+    if (value === "pending_human_review") return "待人工审核";
+    return value === undefined || value === null ? "未知" : String(value);
+  }
+
+  function renderHeader() {
+    var mode = state.calibration && state.calibration.mode ? state.calibration.mode : "未知模式";
+    setText("dataset-line", "结果模式：" + mode + " · 审核状态：" + acceptanceLabel(D.acceptance));
+    var reference = D.has_imu ? "IMU" : D.reference;
+    var trajectory = state.trajectory;
+    setText("reference-line", "静态参考系：" + reference +
+      (trajectory.available ? " · 轨迹系：" + trajectory.frame + " · 轨迹刚体：" + trajectory.bodyFrame : " · 无轨迹数据"));
+    setText("static-reference", "参考传感器：" + reference + "（位置为 0, 0, 0 mm）");
+    var badge = document.getElementById("acceptance-badge");
+    badge.textContent = "审核状态：" + acceptanceLabel(D.acceptance);
+  }
+
+  function renderStaticTable() {
+    var body = document.getElementById("static-positions");
+    clear(body);
+    var rows = [];
+    if (D.has_imu) rows.push({ id: "IMU", position_mm: [0, 0, 0] });
+    for (var i = 0; i < state.poses.length; i += 1) rows.push(state.poses[i]);
+    for (var r = 0; r < rows.length; r += 1) {
+      var row = document.createElement("tr");
+      appendCell(row, rows[r].id);
+      var position = rows[r].position_mm;
+      for (var axis = 0; axis < 3; axis += 1) {
+        appendCell(row, finiteVector(position, 3) ? formatFixed(position[axis], 2) : "—");
+      }
+      body.append(row);
+    }
+    if (rows.length === 0) {
+      var empty = document.createElement("tr");
+      appendCell(empty, "无静态位姿数据");
+      body.append(empty);
+    }
+  }
+
+  var PINHOLE_MODELS = {
+    "none": { label: "None", active: [] },
+    "radtan5": { label: "Radtan5", active: [["k1", 0], ["k2", 1], ["p1", 2], ["p2", 3], ["k3", 4]] },
+    "radtan8": { label: "Radtan8", active: [["k1", 0], ["k2", 1], ["p1", 2], ["p2", 3], ["k3", 4], ["k4", 5], ["k5", 6], ["k6", 7]] },
+    "d12": { label: "D12", active: [["k1", 0], ["k2", 1], ["p1", 2], ["p2", 3], ["k3", 4], ["k4", 5], ["k5", 6], ["k6", 7], ["s1", 8], ["s2", 9], ["s3", 10], ["s4", 11]] },
+    "radtan5-tilted": { label: "Radtan5Tilted", active: [["k1", 0], ["k2", 1], ["p1", 2], ["p2", 3], ["k3", 4], ["tau_x", 12], ["tau_y", 13]] },
+    "radtan8-tilted": { label: "Radtan8Tilted", active: [["k1", 0], ["k2", 1], ["p1", 2], ["p2", 3], ["k3", 4], ["k4", 5], ["k5", 6], ["k6", 7], ["tau_x", 12], ["tau_y", 13]] },
+    "radtan5-thinprism": { label: "Radtan5ThinPrism", active: [["k1", 0], ["k2", 1], ["p1", 2], ["p2", 3], ["k3", 4], ["s1", 8], ["s2", 9], ["s3", 10], ["s4", 11]] },
+    "radtan5-thinprism-tilted": { label: "Radtan5ThinPrismTilted", active: [["k1", 0], ["k2", 1], ["p1", 2], ["p2", 3], ["k3", 4], ["s1", 8], ["s2", 9], ["s3", 10], ["s4", 11], ["tau_x", 12], ["tau_y", 13]] },
+    "d12-tilted": { label: "D12Tilted", active: [["k1", 0], ["k2", 1], ["p1", 2], ["p2", 3], ["k3", 4], ["k4", 5], ["k5", 6], ["k6", 7], ["s1", 8], ["s2", 9], ["s3", 10], ["s4", 11], ["tau_x", 12], ["tau_y", 13]] }
+  };
+
+  function describeIntrinsics(camera) {
+    var outer = camera.parameters || {};
+    var model = String(outer.model || "未知");
+    var parameters = outer.parameters || {};
+    var description = { label: model, rows: [] };
+    var rows = description.rows;
+
+    function push(name, value, unit) {
+      rows.push({ name: name, value: value, unit: unit });
+    }
+
+    if (model === "pinhole") {
+      var inner = String(parameters.model || "");
+      var known = PINHOLE_MODELS[inner];
+      description.label = "Pinhole · " + (known ? known.label : inner || "未知子模型");
+      push("fx", parameters.fx, "px");
+      push("fy", parameters.fy, "px");
+      push("cx", parameters.cx, "px");
+      push("cy", parameters.cy, "px");
+      var slots = parameters.coefficients && Array.isArray(parameters.coefficients.slots)
+        ? parameters.coefficients.slots
+        : null;
+      if (known && slots) {
+        for (var i = 0; i < known.active.length; i += 1) {
+          var pair = known.active[i];
+          var unit = pair[0].indexOf("tau_") === 0 ? "rad" : "无量纲";
+          push(pair[0], slots[pair[1]], unit);
+        }
+      } else if (slots) {
+        for (var s = 0; s < slots.length; s += 1) push("slot_" + s, slots[s], "无量纲");
+      }
+    } else if (model === "kannala-brandt4") {
+      description.label = "KannalaBrandt4";
+      push("fx", parameters.fx, "px");
+      push("fy", parameters.fy, "px");
+      push("cx", parameters.cx, "px");
+      push("cy", parameters.cy, "px");
+      push("k1", parameters.k1, "rad⁻²");
+      push("k2", parameters.k2, "rad⁻⁴");
+      push("k3", parameters.k3, "rad⁻⁶");
+      push("k4", parameters.k4, "rad⁻⁸");
+    } else if (model === "extended-unified") {
+      description.label = "ExtendedUnified";
+      push("fx", parameters.fx, "px");
+      push("fy", parameters.fy, "px");
+      push("cx", parameters.cx, "px");
+      push("cy", parameters.cy, "px");
+      push("alpha", parameters.alpha, "无量纲");
+      push("beta", parameters.beta, "无量纲");
+    } else if (model === "double-sphere") {
+      description.label = "DoubleSphere";
+      push("fx", parameters.fx, "px");
+      push("fy", parameters.fy, "px");
+      push("cx", parameters.cx, "px");
+      push("cy", parameters.cy, "px");
+      push("xi", parameters.xi, "无量纲");
+      push("alpha", parameters.alpha, "无量纲");
+    } else {
+      Object.keys(parameters).forEach(function (key) {
+        if (finiteNumber(parameters[key])) {
+          push(key, parameters[key], "模型定义");
+        }
+      });
+    }
+    return description;
+  }
+
+  function renderCameraParameters() {
+    var container = document.getElementById("camera-parameters");
+    clear(container);
+    var cameras = state.calibration && Array.isArray(state.calibration.cameras)
+      ? state.calibration.cameras
+      : [];
+    if (cameras.length === 0) {
+      container.append(element("p", "note", "本次结果未嵌入相机内参数据。"));
+      return;
+    }
+    for (var i = 0; i < cameras.length; i += 1) {
+      var camera = cameras[i];
+      var card = element("article", "camera-card");
+      var title = element("div", "title");
+      title.append(element("b", "mono", String(camera.id)));
+      var description = describeIntrinsics(camera);
+      title.append(element("span", "model", description.label));
+      card.append(title);
+      var width = camera.image_width;
+      var height = camera.image_height;
+      card.append(element("div", "size",
+        "图像尺寸：" + (finiteNumber(width) ? width : "—") + " × " +
+        (finiteNumber(height) ? height : "—") + " px"));
+      var table = element("table");
+      var tbody = document.createElement("tbody");
+      for (var r = 0; r < description.rows.length; r += 1) {
+        var row = document.createElement("tr");
+        appendCell(row, description.rows[r].name);
+        appendCell(row, formatValue(description.rows[r].value, 7));
+        appendCell(row, description.rows[r].unit);
+        tbody.append(row);
+      }
+      table.append(tbody);
+      card.append(table);
+      container.append(card);
+    }
+  }
+
+  function renderResiduals() {
+    var container = document.getElementById("residual-content");
+    clear(container);
+    var summary = state.summary;
+    if (!summary) {
+      container.append(element("p", "note", "本次结果未嵌入求解摘要（solve summary），收敛与残余统计不适用。"));
+      return;
+    }
+    var global = element("table");
+    var tbody = document.createElement("tbody");
+    function globalRow(name, value) {
+      var row = document.createElement("tr");
+      appendCell(row, name);
+      appendCell(row, value);
+      tbody.append(row);
+    }
+    globalRow("数值收敛", summary.converged === true ? "是" : summary.converged === false ? "否" : "—");
+    globalRow("终止原因", summary.termination === undefined ? "—" : String(summary.termination));
+    globalRow("迭代次数", finiteNumber(summary.iterations) ? String(summary.iterations) : "—");
+    globalRow("cost", formatCost(summary.initial_cost) + " → " + formatCost(summary.final_cost));
+    globalRow("最终阻尼", formatCost(summary.final_damping));
+    globalRow("缩放梯度 ∞ 范数", formatCost(summary.scaled_gradient_inf_norm));
+    globalRow("步数（接受 / 拒绝）",
+      (finiteNumber(summary.accepted_steps) ? summary.accepted_steps : "—") + " / " +
+      (finiteNumber(summary.rejected_steps) ? summary.rejected_steps : "—"));
+    globalRow("信息矩阵 rank / 参数",
+      (finiteNumber(summary.information_rank) ? summary.information_rank : "—") + " / " +
+      (finiteNumber(summary.information_parameters) ? summary.information_parameters : "—"));
+    globalRow("条件数", formatCost(summary.condition_number));
+    globalRow("协方差", summary.covariance_is_pseudoinverse === true ? "伪逆"
+      : summary.covariance_is_pseudoinverse === false ? "全秩逆" : "—");
+    if (summary.inertial_whitened_rms !== null && summary.inertial_whitened_rms !== undefined) {
+      globalRow("IMU 白化 RMS", formatValue(summary.inertial_whitened_rms, 6));
+    }
+    global.append(tbody);
+    container.append(global);
+
+    var heading = element("h3", null, "逐相机残余");
+    heading.style.marginTop = "14px";
+    container.append(heading);
+    var errors = Array.isArray(summary.camera_errors) ? summary.camera_errors : [];
+    if (errors.length === 0) {
+      container.append(element("p", "note", "摘要中没有逐相机残差统计。"));
+      return;
+    }
+    var cameras = state.calibration && Array.isArray(state.calibration.cameras)
+      ? state.calibration.cameras
+      : [];
+    var table = element("table");
+    var head = document.createElement("thead");
+    var headRow = document.createElement("tr");
+    ["相机", "使用点", "剔除点", "RMS px", "P95 px"].forEach(function (name) {
+      headRow.append(element("th", null, name));
+    });
+    head.append(headRow);
+    table.append(head);
+    var body = document.createElement("tbody");
+    for (var i = 0; i < errors.length; i += 1) {
+      var error = errors[i] || {};
+      var index = finiteNumber(error.camera_index) ? error.camera_index : i;
+      var id = cameras[index] && cameras[index].id ? cameras[index].id : "相机索引 " + index;
+      var row = document.createElement("tr");
+      appendCell(row, id);
+      appendCell(row, finiteNumber(error.used_points) ? String(error.used_points) : "—");
+      appendCell(row, finiteNumber(error.rejected_points) ? String(error.rejected_points) : "—");
+      appendCell(row, formatValue(error.rms_px, 6));
+      appendCell(row, formatValue(error.p95_px, 6));
+      body.append(row);
+    }
+    table.append(body);
+    container.append(table);
+  }
+
+  function matrixTable(matrix, label) {
+    var table = element("table", "matrix");
+    var thead = document.createElement("thead");
+    var headRow = document.createElement("tr");
+    headRow.append(element("th", null, label));
+    ["X", "Y", "Z"].forEach(function (name) { headRow.append(element("th", null, name)); });
+    thead.append(headRow);
+    table.append(thead);
+    var body = document.createElement("tbody");
+    for (var i = 0; i < 3; i += 1) {
+      var row = document.createElement("tr");
+      row.append(element("th", null, "XYZ"[i]));
+      for (var j = 0; j < 3; j += 1) {
+        var value = matrix && matrix[i] ? matrix[i][j] : undefined;
+        appendCell(row, formatValue(value, 7));
+      }
+      body.append(row);
+    }
+    table.append(body);
+    return table;
+  }
+
+  function renderInertial() {
+    var container = document.getElementById("inertial-content");
+    clear(container);
+    var inertial = state.calibration && state.calibration.inertial ? state.calibration.inertial : null;
+    if (!inertial) {
+      container.append(element("p", "note", "本次结果不含 IMU，IMU 偏置、重力、时间偏移与轴矩阵均不适用。"));
+      return;
+    }
+    var table = element("table");
+    var tbody = document.createElement("tbody");
+    function row(name, value) {
+      var tr = document.createElement("tr");
+      appendCell(tr, name);
+      appendCell(tr, value);
+      tbody.append(tr);
+    }
+    row("方法", inertial.method === undefined ? "—" : String(inertial.method));
+    row("时间偏移 (s)", formatValue(inertial.time_offset_s, 8));
+    if (finiteVector(inertial.gyro_bias_rad_s, 3)) {
+      row("陀螺偏置 (rad/s)", vectorText(inertial.gyro_bias_rad_s, 8));
+    } else {
+      row("陀螺偏置 (rad/s)", "—");
+    }
+    if (finiteVector(inertial.accelerometer_bias_m_s2, 3)) {
+      row("加速度计偏置 (m/s²)", vectorText(inertial.accelerometer_bias_m_s2, 8));
+    } else {
+      row("加速度计偏置 (m/s²)", "—");
+    }
+    if (finiteVector(inertial.gravity_world_m_s2, 3)) {
+      var gravity = inertial.gravity_world_m_s2;
+      row("世界系重力 (m/s²)", vectorText(gravity, 8));
+      row("重力模长 (m/s²)", formatValue(Math.hypot(gravity[0], gravity[1], gravity[2]), 8));
+    } else {
+      row("世界系重力 (m/s²)", "—");
+    }
+    table.append(tbody);
+    container.append(table);
+
+    var convention = element("p", "note",
+      "物理测量约定：physical = axis · raw − bias。偏置位于校准后的物理测量系；" +
+      "preintegration 的轴矩阵为单位阵，原始系与物理系相同。");
+    container.append(convention);
+
+    var axes = inertial.axis_calibration;
+    if (axes) {
+      container.append(element("h3", null, "陀螺轴矩阵 · 行主序"));
+      container.append(matrixTable(axes.gyro_calibrated_from_raw, "A_gyro"));
+      var accelHeading = element("h3", null, "加速度计轴矩阵 · 行主序");
+      accelHeading.style.marginTop = "10px";
+      container.append(accelHeading);
+      container.append(matrixTable(axes.accelerometer_calibrated_from_raw, "A_accel"));
+    } else {
+      container.append(element("p", "note", "IMU 结果缺少轴矩阵。"));
+    }
+  }
+
+  function renderTrajectoryMeta() {
+    var trajectory = state.trajectory;
+    var meta = document.getElementById("trajectory-meta");
+    var conventions = document.getElementById("trajectory-conventions");
+    clear(conventions);
+    if (!trajectory.available) {
+      meta.textContent = trajectory.reason;
+      conventions.append(element("div", "note", "静态构型视图不依赖轨迹数据。"));
+      renderBoardNote();
+      return;
+    }
+    meta.textContent =
+      "frame：" + trajectory.frame +
+      " · body_frame：" + trajectory.bodyFrame +
+      " · time_basis：" + trajectory.timeBasis +
+      " · time_origin_ns：" + trajectory.timeOriginNs +
+      " · 采样点：" + trajectory.samples.length +
+      " · t ∈ [" + formatFixed(trajectory.start, 3) + ", " + formatFixed(trajectory.end, 3) + "] s";
+    conventions.append(element("div", "note",
+      "位置单位为米 (m)，旋转按行主序存储。每个采样是 T_frame_from_body：body 原点位置 t 与姿态 R。"));
+    conventions.append(element("div", "note",
+      "time_s 为相对 time_origin_ns 的时间戳（秒），严格递增；播放按真实时间戳 1× 推进。"));
+    conventions.append(element("div", "note",
+      "采样点来自最终求解；采样间播放仅用平移线性插值与旋转 SLERP，不能视作额外求解结果或连续时间样条的精确求值。"));
+    conventions.append(element("div", "note",
+      "轨迹颜色：按每个采样点的真实 time_s 在 [起点, 终点] 内的归一化位置取色（蓝 → 青 → 黄 → 红），不是按采样序号；底部色标同步显示当前时间。"));
+    if (state.rig && state.rig.body) {
+      conventions.append(element("div", "note",
+        "轨迹刚体：" + state.rig.body.label +
+        "；传感器外参由标定结果中的 T_cam_from_body 合成。"));
+    }
+    renderBoardNote();
+  }
+
+  function renderBoardNote() {
+    var note = document.getElementById("board-note");
+    if (!note) return;
+    var board = state.board;
+    if (!board.available) {
+      note.textContent = board.reason;
+      return;
+    }
+    var trajectory = state.trajectory;
+    if (!trajectory.available) {
+      note.textContent = "标定板几何已导出（frame：" + board.frame + "，共 " + board.tags.length + " 个 tag）；无轨迹时不在静态构型中显示。";
+      return;
+    }
+    if (board.frame !== trajectory.frame) {
+      note.textContent = "标定板 frame（" + board.frame + "）与轨迹 frame（" + trajectory.frame + "）不一致，未在轨迹视图中叠加显示。";
+      return;
+    }
+    var tagSize = Math.hypot.apply(null, subtractVector(board.tags[0].corners[1], board.tags[0].corners[0]));
+    var dimensions = board.outline ? [
+      Math.hypot.apply(null, subtractVector(board.outline[1], board.outline[0])),
+      Math.hypot.apply(null, subtractVector(board.outline[3], board.outline[0]))
+    ] : null;
+    note.textContent = "配置几何：" + board.tags.length + " 个 Tag，单 Tag 边长 " + formatValue(tagSize * 1000, 6) + " mm" +
+      (dimensions ? "；图案区域 " + formatValue(dimensions[0] * 1000, 6) + " × " + formatValue(dimensions[1] * 1000, 6) + " mm" : "") +
+      "。位于 " + board.frame + " 系 Z=0；O 为首个 Tag 角点，未居中或单独缩放。相机线框仅示意朝向，不代表实物尺寸。";
+  }
+
+  function renderPoseSensorTable() {
+    var table = document.getElementById("pose-sensors");
+    var body = document.getElementById("pose-sensor-rows");
+    var note = document.getElementById("pose-sensor-note");
+    var title = document.getElementById("pose-sensors-title");
+    clear(body);
+    sensorRows = [];
+    var rig = state.rig;
+    if (!rig || !rig.body) {
+      table.hidden = true;
+      title.hidden = true;
+      note.hidden = false;
+      note.textContent = rig && rig.note ? rig.note : "缺少刚体或传感器外参，无法显示当前位姿下的传感器位置。";
+      return;
+    }
+    title.hidden = false;
+    note.hidden = !rig.note;
+    note.textContent = rig.note || "";
+    if (rig.sensors.length === 0) {
+      table.hidden = true;
+      return;
+    }
+    table.hidden = false;
+    for (var i = 0; i < rig.sensors.length; i += 1) {
+      var sensor = rig.sensors[i];
+      var row = document.createElement("tr");
+      appendCell(row, sensor.id);
+      var cells = [];
+      for (var axis = 0; axis < 3; axis += 1) {
+        cells.push(appendCell(row, "—"));
+      }
+      body.append(row);
+      sensorRows.push({ sensor: sensor, cells: cells });
+    }
+  }
+
+  function renderPoseReadout() {
+    var status = document.getElementById("pose-status");
+    var table = document.getElementById("pose-table");
+    var trajectory = state.trajectory;
+    if (state.mode !== "trajectory" || !trajectory.available) {
+      status.textContent = trajectory.available
+        ? "当前为静态构型模式；切换到“求解轨迹”查看按时间采样的位姿。"
+        : "静态构型模式：" + trajectory.reason;
+      table.hidden = true;
+      document.getElementById("pose-sensors").hidden = true;
+      document.getElementById("pose-sensors-title").hidden = true;
+      document.getElementById("pose-sensor-note").hidden = true;
+      return;
+    }
+    status.textContent = "轨迹位姿 T_frame_from_body（" + trajectory.frame + " ← " + trajectory.bodyFrame + "）；采样点之间为显示插值。";
+    table.hidden = false;
+    var rig = state.rig;
+    var sensorTable = document.getElementById("pose-sensors");
+    var sensorTitle = document.getElementById("pose-sensors-title");
+    var sensorNote = document.getElementById("pose-sensor-note");
+    var hasSensors = !!(rig && rig.body && rig.sensors.length > 0);
+    sensorTable.hidden = !hasSensors;
+    sensorTitle.hidden = !hasSensors;
+    sensorNote.hidden = !(rig && rig.note);
+    if (rig && rig.note) sensorNote.textContent = rig.note;
+    var pose = poseAtTime(state.currentTime);
+    setText("pose-time", formatValue(state.currentTime, 9) + " s");
+    setText("pose-position", vectorText(pose.position, 8));
+    var rotationLines = [];
+    for (var i = 0; i < 3; i += 1) {
+      rotationLines.push("[" + pose.rotation[i].map(function (value) {
+        return formatValue(value, 7);
+      }).join(", ") + "]");
+    }
+    setText("pose-rotation", rotationLines.join("\n"));
+    setText("pose-quaternion", vectorText(pose.quaternion, 8));
+    updatePoseSensors(pose);
+  }
+
+  function updatePoseSensors(pose) {
+    if (sensorRows.length === 0) return;
+    var world = { rotation: pose.rotation, translation: pose.position };
+    for (var i = 0; i < sensorRows.length; i += 1) {
+      var entry = sensorRows[i];
+      var composed = composePose(world, {
+        rotation: entry.sensor.rotation,
+        translation: entry.sensor.translation
+      });
+      for (var axis = 0; axis < 3; axis += 1) {
+        entry.cells[axis].textContent = formatValue(composed.translation[axis], 7);
+      }
+    }
+  }
+
+  function updateTimeColorbar() {
+    var trajectory = state.trajectory;
+    var bar = document.getElementById("time-colorbar");
+    if (!trajectory.available) {
+      bar.hidden = true;
+      return;
+    }
+    var duration = trajectory.end - trajectory.start;
+    var fraction = duration > 0 ? (state.currentTime - trajectory.start) / duration : 0;
+    fraction = Math.min(1, Math.max(0, fraction));
+    document.getElementById("colorbar-cursor").style.left = (fraction * 100).toFixed(3) + "%";
+    document.getElementById("colorbar-current").textContent = formatFixed(state.currentTime, 3) + " s";
+    var signature = trajectory.start + "|" + trajectory.end;
+    if (signature === timeBarSignature) return;
+    timeBarSignature = signature;
+    var ticks = document.getElementById("colorbar-ticks");
+    clear(ticks);
+    ticks.append(element("span", null, formatFixed(trajectory.start, 3)));
+    ticks.append(element("span", null, formatFixed((trajectory.start + trajectory.end) / 2, 3)));
+    ticks.append(element("span", null, formatFixed(trajectory.end, 3)));
+  }
+
+  function updateTimeUI() {
+    var trajectory = state.trajectory;
+    var slider = document.getElementById("time-slider");
+    var label = document.getElementById("time-label");
+    if (!trajectory.available) {
+      slider.disabled = true;
+      label.textContent = "无轨迹";
+      updateTimeColorbar();
+      return;
+    }
+    var duration = trajectory.end - trajectory.start;
+    slider.disabled = !(duration > 0);
+    document.getElementById("play").disabled = !(duration > 0);
+    slider.min = String(trajectory.start);
+    slider.max = String(trajectory.end);
+    slider.step = duration > 0 ? String(duration / 2000) : "any";
+    slider.value = String(state.currentTime);
+    label.textContent = formatFixed(state.currentTime, 3) + " / " + formatFixed(trajectory.end, 3) + " s";
+    updateTimeColorbar();
+  }
+
+  // --------------------------------------------------------------- drawing
+
+  function resizeCanvas() {
+    W = canvas.clientWidth;
+    H = canvas.clientHeight;
+    var ratio = window.devicePixelRatio || 1;
+    canvas.width = Math.max(1, Math.round(W * ratio));
+    canvas.height = Math.max(1, Math.round(H * ratio));
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    draw();
+  }
+
+  function projectionScale() {
+    return Math.min(W, H) / (state.view.span * 1.9) * state.view.zoom;
+  }
+
+  function project(point) {
+    var view = state.view;
+    var x = point[0] - view.center[0];
+    var y = point[1] - view.center[1];
+    var z = point[2] - view.center[2];
+    var ca = Math.cos(view.az);
+    var sa = Math.sin(view.az);
+    var ce = Math.cos(view.el);
+    var se = Math.sin(view.el);
+    var scale = projectionScale();
+    return {
+      x: W / 2 + view.pan[0] + (-sa * x + ca * y) * scale,
+      y: H / 2 + view.pan[1] - (-se * ca * x - se * sa * y + ce * z) * scale,
+      depth: ce * ca * x + ce * sa * y + se * z
+    };
+  }
+
+  function paintSegments(segments) {
+    if (segments.length === 0) return;
+    var projected = segments.map(function (segment) {
+      var a = project(segment.a);
+      var b = project(segment.b);
+      return { segment: segment, a: a, b: b, depth: (a.depth + b.depth) / 2 };
+    });
+    projected.sort(function (first, second) { return first.depth - second.depth; });
+    for (var i = 0; i < projected.length; i += 1) {
+      var entry = projected[i];
+      ctx.strokeStyle = entry.segment.color;
+      ctx.lineWidth = entry.segment.width;
+      ctx.setLineDash(entry.segment.dash ? [4, 5] : []);
+      ctx.beginPath();
+      ctx.moveTo(entry.a.x, entry.a.y);
+      ctx.lineTo(entry.b.x, entry.b.y);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+  }
+
+  function paintMarkers(markers) {
+    for (var i = 0; i < markers.length; i += 1) {
+      var point = project(markers[i].p);
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, 4.5, 0, Math.PI * 2);
+      ctx.fillStyle = markers[i].color;
+      ctx.fill();
+      ctx.strokeStyle = "#0b1220";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+  }
+
+  function paintPolygons(polygons) {
+    for (var i = 0; i < polygons.length; i += 1) {
+      var points = polygons[i].points;
+      if (!points || points.length < 3) continue;
+      ctx.beginPath();
+      for (var p = 0; p < points.length; p += 1) {
+        var point = project(points[p]);
+        if (p === 0) ctx.moveTo(point.x, point.y);
+        else ctx.lineTo(point.x, point.y);
+      }
+      ctx.closePath();
+      ctx.fillStyle = polygons[i].fill;
+      ctx.fill();
+    }
+  }
+
+  function paintLabels(labels) {
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    for (var i = 0; i < labels.length; i += 1) {
+      var label = labels[i];
+      var point = project(label.p);
+      var x = point.x + (label.dx || 0);
+      var y = point.y + (label.dy || -10);
+      ctx.font = (label.size || 12) + "px system-ui, -apple-system, sans-serif";
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = "rgba(11, 18, 32, 0.85)";
+      ctx.strokeText(label.text, x, y);
+      ctx.fillStyle = label.color || "#cbd5e1";
+      ctx.fillText(label.text, x, y);
+    }
+  }
+
+  function gridSegments(minZ) {
+    var span = state.view.span;
+    var step = span / 5;
+    var center = state.view.center;
+    var extent = span * 1.6;
+    var z = minZ - span * 0.08;
+    var segments = [];
+    for (var i = -3; i <= 3; i += 1) {
+      var offset = i * step;
+      segments.push({
+        a: [center[0] - extent, center[1] + offset, z],
+        b: [center[0] + extent, center[1] + offset, z],
+        color: "#1e293b", width: 1
+      });
+      segments.push({
+        a: [center[0] + offset, center[1] - extent, z],
+        b: [center[0] + offset, center[1] + extent, z],
+        color: "#1e293b", width: 1
+      });
+    }
+    return segments;
+  }
+
+  function addAxes(segments, position, rotation, length, width) {
+    for (var axis = 0; axis < 3; axis += 1) {
+      var direction = [rotation[0][axis], rotation[1][axis], rotation[2][axis]];
+      var end = [
+        position[0] + direction[0] * length,
+        position[1] + direction[1] * length,
+        position[2] + direction[2] * length
+      ];
+      segments.push({ a: position, b: end, color: AXIS_COLORS[axis], width: width });
+    }
+  }
+
+  function addAxisLabels(labels, position, rotation, length) {
+    for (var axis = 0; axis < 3; axis += 1) {
+      var direction = [rotation[0][axis], rotation[1][axis], rotation[2][axis]];
+      labels.push({
+        text: "XYZ"[axis],
+        p: [
+          position[0] + direction[0] * length,
+          position[1] + direction[1] * length,
+          position[2] + direction[2] * length
+        ],
+        color: AXIS_COLORS[axis],
+        dy: -6
+      });
+    }
+  }
+
+  function addCameraWireframe(segments, position, rotation, color, depth, width) {
+    var corners = [[-0.45, -0.3, 1], [0.45, -0.3, 1], [0.45, 0.3, 1], [-0.45, 0.3, 1]].map(function (corner) {
+      var scaled = [corner[0] * depth, corner[1] * depth, corner[2] * depth];
+      return [
+        position[0] + rotation[0][0] * scaled[0] + rotation[0][1] * scaled[1] + rotation[0][2] * scaled[2],
+        position[1] + rotation[1][0] * scaled[0] + rotation[1][1] * scaled[1] + rotation[1][2] * scaled[2],
+        position[2] + rotation[2][0] * scaled[0] + rotation[2][1] * scaled[1] + rotation[2][2] * scaled[2]
+      ];
+    });
+    for (var i = 0; i < 4; i += 1) {
+      segments.push({ a: position, b: corners[i], color: color, width: width });
+      segments.push({ a: corners[i], b: corners[(i + 1) % 4], color: color, width: width });
+    }
+  }
+
+  function boundsOfPoints(points, fallbackSpan) {
+    if (points.length === 0) {
+      return { center: [0, 0, 0], span: fallbackSpan };
+    }
+    var low = [Infinity, Infinity, Infinity];
+    var high = [-Infinity, -Infinity, -Infinity];
+    for (var i = 0; i < points.length; i += 1) {
+      for (var axis = 0; axis < 3; axis += 1) {
+        low[axis] = Math.min(low[axis], points[i][axis]);
+        high[axis] = Math.max(high[axis], points[i][axis]);
+      }
+    }
+    var extent = Math.max(high[0] - low[0], high[1] - low[1], high[2] - low[2]);
+    return {
+      center: [(low[0] + high[0]) / 2, (low[1] + high[1]) / 2, (low[2] + high[2]) / 2],
+      span: Math.max(fallbackSpan, extent * 1.2)
+    };
+  }
+
+  function fitView() {
+    if (state.mode === "trajectory" && state.trajectory.available) {
+      var rigRadius = 0;
+      if (state.rig) {
+        for (var i = 0; i < state.rig.sensors.length; i += 1) {
+          var translation = state.rig.sensors[i].translation;
+          rigRadius = Math.max(rigRadius, Math.hypot(translation[0], translation[1], translation[2]));
+        }
+      }
+      // Fit the decimated trajectory together with the frame origin and, when
+      // its frame matches the trajectory, every exported board corner.
+      var points = state.trajectory.fitPoints.slice();
+      points.push([0, 0, 0]);
+      if (state.board.available && state.board.frame === state.trajectory.frame) {
+        for (var t = 0; t < state.board.tags.length; t += 1) {
+          for (var c = 0; c < 4; c += 1) points.push(state.board.tags[t].corners[c]);
+        }
+      }
+      var fitted = boundsOfPoints(points, state.trajectory.bounds.span);
+      state.view.center = fitted.center;
+      state.view.span = Math.max(fitted.span, rigRadius * 3);
+    } else {
+      var staticPoints = [[0, 0, 0]];
+      for (var p = 0; p < state.poses.length; p += 1) {
+        if (finiteVector(state.poses[p].position_mm, 3)) staticPoints.push(state.poses[p].position_mm);
+      }
+      var staticBounds = boundsOfPoints(staticPoints, 40);
+      state.view.center = staticBounds.center;
+      state.view.span = staticBounds.span;
+    }
+    state.view.pan = [0, 0];
+    state.view.zoom = 1;
+    draw();
+  }
+
+  function staticScene() {
+    var segments = [];
+    var labels = [];
+    var points = [[0, 0, 0]];
+    for (var p = 0; p < state.poses.length; p += 1) {
+      if (finiteVector(state.poses[p].position_mm, 3)) points.push(state.poses[p].position_mm);
+    }
+    var bounds = boundsOfPoints(points, 40);
+    var span = Math.max(state.view.span, bounds.span);
+    var axisLength = span * 0.12;
+    var depth = span * 0.16;
+    var minZ = Math.min.apply(null, points.map(function (point) { return point[2]; }));
+
+    if (D.has_imu) {
+      addAxes(segments, [0, 0, 0], IDENTITY_ROTATION, axisLength, 3);
+      addAxisLabels(labels, [0, 0, 0], IDENTITY_ROTATION, axisLength);
+      labels.push({ text: "IMU", p: [0, 0, 0], color: "#e2e8f0", dy: -16 });
+    }
+
+    for (var i = 0; i < state.poses.length; i += 1) {
+      var sensor = state.poses[i];
+      if (!finiteVector(sensor.position_mm, 3) || !finiteMatrix(sensor.rotation)) continue;
+      var color = SENSOR_COLORS[i % SENSOR_COLORS.length];
+      addAxes(segments, sensor.position_mm, sensor.rotation, axisLength, 2.5);
+      addCameraWireframe(segments, sensor.position_mm, sensor.rotation, color, depth, 1.5);
+      if (Math.hypot(sensor.position_mm[0], sensor.position_mm[1], sensor.position_mm[2]) > 1e-9) {
+        segments.push({ a: [0, 0, 0], b: sensor.position_mm, color: "#64748b", width: 1, dash: true });
+      }
+      labels.push({ text: String(sensor.id), p: sensor.position_mm, color: color, dy: -16 });
+      if (!D.has_imu && sensor.id === D.reference) {
+        addAxisLabels(labels, sensor.position_mm, sensor.rotation, axisLength);
+      }
+    }
+    return { segments: segments, labels: labels, markers: [], minZ: minZ };
+  }
+
+  function trajectoryScene(time) {
+    var trajectory = state.trajectory;
+    var segments = trajectory.pathSegments.slice();
+    var polygons = [];
+    var labels = [];
+    var samples = trajectory.samples;
+    var minZ = Math.min(trajectory.minZ, 0);
+
+    // The board is drawn only when the exporter declares it in the same frame
+    // as the trajectory; otherwise its coordinates would be misread.
+    var board = state.board;
+    var boardVisible = board.available && board.frame === trajectory.frame;
+    if (boardVisible) {
+      if (board.outline) {
+        polygons.push({ points: board.outline, fill: BOARD_SURFACE });
+        labels.push({ text: "Tag 图案区域（配置尺寸）", p: board.outline[2], color: BOARD_OUTLINE, dy: -16 });
+        for (var edge = 0; edge < 4; edge += 1) {
+          segments.push({
+            a: board.outline[edge],
+            b: board.outline[(edge + 1) % 4],
+            color: BOARD_OUTLINE,
+            width: 2
+          });
+        }
+      }
+      for (var square of board.gapSquares) {
+        polygons.push({ points: square, fill: "#000000" });
+      }
+      for (var tagIndex = 0; tagIndex < board.tags.length; tagIndex += 1) {
+        var boardTag = board.tags[tagIndex];
+        for (var side = 0; side < 4; side += 1) {
+          var corner = boardTag.corners[side];
+          minZ = Math.min(minZ, corner[2]);
+          segments.push({
+            a: corner,
+            b: boardTag.corners[(side + 1) % 4],
+            color: BOARD_TAG,
+            width: 1.5
+          });
+        }
+        labels.push({ text: String(boardTag.id), p: boardTag.center, color: "#e2e8f0", dy: 0, size: 11 });
+      }
+    }
+
+    // Frame origin axes stay visible so the board/trajectory frame is unambiguous.
+    var originLength = Math.max(state.view.span * 0.14, 0.02);
+    addAxes(segments, [0, 0, 0], IDENTITY_ROTATION, originLength, 2.5);
+    labels.push({ text: "O", p: [0, 0, 0], color: "#e2e8f0", dy: 14, size: 12 });
+    for (var originAxis = 0; originAxis < 3; originAxis += 1) {
+      var originEnd = [0, 0, 0];
+      originEnd[originAxis] = originLength;
+      labels.push({
+        text: "XYZ"[originAxis] + "0",
+        p: originEnd,
+        color: AXIS_COLORS[originAxis],
+        dy: -6,
+        size: 11
+      });
+    }
+
+    var pose = poseAtTime(time);
+    var axisLength = Math.min(state.view.span * 0.08, Math.max(state.view.span * 0.025, 0.02));
+    var rigRadius = 0;
+    if (state.rig) {
+      for (var r = 0; r < state.rig.sensors.length; r += 1) {
+        var local = state.rig.sensors[r].translation;
+        rigRadius = Math.max(rigRadius, Math.hypot(local[0], local[1], local[2]));
+      }
+    }
+    axisLength = Math.min(state.view.span * 0.1,
+      Math.max(axisLength, rigRadius * 1.5, state.view.span * 0.02));
+    var depth = axisLength * 0.7;
+
+    addAxes(segments, pose.position, pose.rotation, axisLength * 1.25, 4);
+    addAxisLabels(labels, pose.position, pose.rotation, axisLength * 1.25);
+    labels.push({
+      text: "body " + trajectory.bodyFrame + " · " + formatFixed(time, 3) + " s",
+      p: pose.position,
+      color: "#e2e8f0",
+      dy: -22
+    });
+
+    if (state.rig) {
+      for (var sensorIndex = 0; sensorIndex < state.rig.sensors.length; sensorIndex += 1) {
+        var sensor = state.rig.sensors[sensorIndex];
+        var world = composePose(
+          { rotation: pose.rotation, translation: pose.position },
+          { rotation: sensor.rotation, translation: sensor.translation }
+        );
+        if (!sensor.isBody) {
+          addAxes(segments, world.translation, world.rotation, axisLength, 2);
+        }
+        addCameraWireframe(segments, world.translation, world.rotation, sensor.color, depth, 1.5);
+        labels.push({ text: sensor.id, p: world.translation, color: sensor.color, dy: -16 });
+      }
+    }
+
+    var start = samples[0];
+    var end = samples[samples.length - 1];
+    var markers = [
+      { p: start.position, color: rampColor(0) },
+      { p: end.position, color: rampColor(1) }
+    ];
+    labels.push({
+      text: "起点 " + formatFixed(trajectory.start, 3) + " s",
+      p: start.position, color: rampColor(0), dy: 16
+    });
+    labels.push({
+      text: "终点 " + formatFixed(trajectory.end, 3) + " s",
+      p: end.position, color: rampColor(1), dy: 16
+    });
+    return {
+      segments: segments,
+      polygons: polygons,
+      labels: labels,
+      markers: markers,
+      minZ: minZ,
+      boardVisible: boardVisible
+    };
+  }
+
+  function draw() {
+    if (!W || !H) return;
+    ctx.clearRect(0, 0, W, H);
+    var scene;
+    var trajectoryMode = state.mode === "trajectory" && state.trajectory.available;
+    if (trajectoryMode) {
+      scene = trajectoryScene(state.currentTime);
+    } else {
+      scene = staticScene();
+    }
+    paintSegments(gridSegments(scene.minZ));
+    paintPolygons(scene.polygons || []);
+    paintSegments(scene.segments);
+    paintMarkers(scene.markers || []);
+    paintLabels(scene.labels);
+    var unit = trajectoryMode ? "m" : "mm";
+    var frame = trajectoryMode
+      ? state.trajectory.frame
+      : (D.has_imu ? "IMU" : D.reference);
+    var badge = (trajectoryMode ? "求解轨迹" : "静态构型") +
+      " · 单位 " + unit + " · " + frame + " 系 · 网格间距 " +
+      formatValue(state.view.span / 5, 3) + " " + unit;
+    if (trajectoryMode && scene.boardVisible) {
+      badge += " · 标定板 " + state.board.tags.length + " tags";
+    }
+    document.getElementById("scene-badge").textContent = badge;
+  }
+
+  // ----------------------------------------------------------- interaction
+
+  function setMode(mode) {
+    if (mode === "trajectory" && !state.trajectory.available) return;
+    state.mode = mode;
+    var staticButton = document.getElementById("mode-static");
+    var trajectoryButton = document.getElementById("mode-trajectory");
+    staticButton.setAttribute("aria-pressed", mode === "static" ? "true" : "false");
+    trajectoryButton.setAttribute("aria-pressed", mode === "trajectory" ? "true" : "false");
+    staticButton.classList.toggle("active", mode === "static");
+    trajectoryButton.classList.toggle("active", mode === "trajectory");
+    document.getElementById("playback-controls").hidden = mode !== "trajectory";
+    document.getElementById("time-colorbar").hidden = mode !== "trajectory" || !state.trajectory.available;
+    if (mode !== "trajectory") pausePlayback();
+    fitView();
+    renderPoseReadout();
+    updateTimeUI();
+  }
+
+  function setTime(time) {
+    var trajectory = state.trajectory;
+    if (!trajectory.available) return;
+    var clamped = Math.min(trajectory.end, Math.max(trajectory.start, time));
+    state.currentTime = clamped;
+    updateTimeUI();
+    renderPoseReadout();
+    draw();
+  }
+
+  function pausePlayback() {
+    state.playing = false;
+    if (state.animationFrame) {
+      cancelAnimationFrame(state.animationFrame);
+      state.animationFrame = 0;
+    }
+    var button = document.getElementById("play");
+    button.textContent = "播放";
+    button.setAttribute("aria-pressed", "false");
+  }
+
+  function playbackTick(now) {
+    if (!state.playing) return;
+    var trajectory = state.trajectory;
+    var elapsed = (now - state.playAnchorWall) / 1000;
+    var target = state.playAnchorTime + elapsed;
+    if (target >= trajectory.end) {
+      setTime(trajectory.end);
+      pausePlayback();
+      return;
+    }
+    setTime(target);
+    state.animationFrame = requestAnimationFrame(playbackTick);
+  }
+
+  function startPlayback() {
+    var trajectory = state.trajectory;
+    if (!trajectory.available || !(trajectory.end > trajectory.start)) return;
+    if (state.currentTime >= trajectory.end) setTime(trajectory.start);
+    state.playing = true;
+    state.playAnchorWall = performance.now();
+    state.playAnchorTime = state.currentTime;
+    var button = document.getElementById("play");
+    button.textContent = "暂停";
+    button.setAttribute("aria-pressed", "true");
+    state.animationFrame = requestAnimationFrame(playbackTick);
+  }
+
+  function togglePlayback() {
+    if (state.playing) pausePlayback();
+    else startPlayback();
+  }
+
+  function resetView() {
+    state.view.az = -0.5;
+    state.view.el = 0.42;
+    fitView();
+  }
+
+  function bindEvents() {
+    document.getElementById("mode-static").addEventListener("click", function () { setMode("static"); });
+    document.getElementById("mode-trajectory").addEventListener("click", function () { setMode("trajectory"); });
+    document.getElementById("fit").addEventListener("click", fitView);
+    document.getElementById("reset").addEventListener("click", resetView);
+    document.getElementById("play").addEventListener("click", togglePlayback);
+
+    var slider = document.getElementById("time-slider");
+    slider.addEventListener("input", function () {
+      var value = Number(slider.value);
+      if (!Number.isFinite(value)) return;
+      if (state.playing) {
+        state.playAnchorWall = performance.now();
+        state.playAnchorTime = Math.min(state.trajectory.end, Math.max(state.trajectory.start, value));
+      }
+      setTime(value);
+    });
+
+    document.querySelectorAll("[data-view]").forEach(function (button) {
+      button.addEventListener("click", function () {
+        var angles = {
+          xy: [-Math.PI / 2, Math.PI / 2],
+          xz: [-Math.PI / 2, 0],
+          yz: [0, 0]
+        }[button.dataset.view];
+        if (!angles) return;
+        state.view.az = angles[0];
+        state.view.el = angles[1];
+        state.view.pan = [0, 0];
+        draw();
+      });
+    });
+
+    canvas.addEventListener("pointerdown", function (event) {
+      state.drag = [event.clientX, event.clientY];
+      canvas.setPointerCapture(event.pointerId);
+      canvas.style.cursor = "grabbing";
+    });
+    canvas.addEventListener("pointermove", function (event) {
+      if (!state.drag) return;
+      var dx = event.clientX - state.drag[0];
+      var dy = event.clientY - state.drag[1];
+      state.drag = [event.clientX, event.clientY];
+      if (event.shiftKey) {
+        state.view.pan[0] += dx;
+        state.view.pan[1] += dy;
+      } else {
+        state.view.az -= dx * 0.008;
+        state.view.el = (state.view.el + dy * 0.008) % (2 * Math.PI);
+      }
+      draw();
+    });
+    ["pointerup", "pointercancel"].forEach(function (name) {
+      canvas.addEventListener(name, function () {
+        state.drag = null;
+        canvas.style.cursor = "grab";
+      });
+    });
+    canvas.addEventListener("wheel", function (event) {
+      event.preventDefault();
+      state.view.zoom = Math.max(0.25, Math.min(8, state.view.zoom * Math.exp(-event.deltaY * 0.001)));
+      draw();
+    }, { passive: false });
+
+    new ResizeObserver(resizeCanvas).observe(canvas);
+  }
+
+  function initialize() {
+    state.rig = buildRig();
+    renderHeader();
+    renderStaticTable();
+    renderCameraParameters();
+    renderResiduals();
+    renderInertial();
+    renderTrajectoryMeta();
+    renderPoseSensorTable();
+    bindEvents();
+
+    var trajectoryButton = document.getElementById("mode-trajectory");
+    trajectoryButton.disabled = !state.trajectory.available;
+    if (!state.trajectory.available) {
+      trajectoryButton.title = state.trajectory.reason;
+    }
+    state.currentTime = state.trajectory.available ? state.trajectory.start : 0;
+    updateTimeUI();
+    setMode(state.trajectory.available ? "trajectory" : "static");
+    renderPoseReadout();
+    resizeCanvas();
+  }
+
+  initialize();
+})();
+</script>
+</body>
+</html>

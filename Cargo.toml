@@ -1,30 +1,37 @@
-[workspace]
-members = [
-    "crates/rigcal-core",
-    "crates/rigcal-camera",
-    "crates/rigcal-io",
-    "crates/rigcal-opencv",
-    "crates/rigcal-gui",
-    "crates/rigcal-ds",
-]
-resolver = "3"
-
-[workspace.package]
+[package]
+name = "four-p-calibration"
+description = "Offline multi-camera and camera-IMU calibration shell"
 edition = "2024"
-version = "0.0.1"
+version = "0.1.0"
 rust-version = "1.92"
 license = "UNLICENSED"
 publish = false
 
-[workspace.dependencies]
-nalgebra = "0.34"   # 与 levenberg-marquardt 0.15 对齐（求解后端用同一个版本，避免双版本互不兼容）
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.29"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "pnm"] }
+ratatui = "0.29"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
-thiserror = "2"
 
-[workspace.lints.rust]
+ccl_calib = { path = "../camera_corelib/crates/ccl_calib" }
+ccl_geometry = { path = "../camera_corelib/crates/ccl_geometry" }
+ccl_image = { path = "../camera_corelib/crates/ccl_image" }
+ccl_rosbag = { path = "../camera_corelib/crates/ccl_rosbag", features = ["ccl-adapters"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.rust]
 unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
 
 [profile.dev]
 opt-level = 2

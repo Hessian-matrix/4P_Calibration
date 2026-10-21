@@ -1,0 +1,27 @@
+schema_version: 1
+mode: intrinsic_prior
+cameras:
+- id: cam0
+  image_width: 640
+  image_height: 480
+  parameters:
+    model: double-sphere
+    parameters:
+      fx: 167.5042938509239
+      fy: 167.50024966884808
+      cx: 318.8271916461723
+      cy: 239.99971581270313
+      xi: -0.24420169259064003
+      alpha: 0.5683501315863043
+- id: cam1
+  image_width: 640
+  image_height: 480
+  parameters:
+    model: double-sphere
+    parameters:
+      fx: 164.22608999315264
+      fy: 164.1591098695746
+      cx: 320.0236300633488
+      cy: 242.55896912439576
+      xi: -0.2569319907770383
+      alpha: 0.5635041408894634

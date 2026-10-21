@@ -1,0 +1,51 @@
+schema_version: 1
+mode: intrinsic_prior
+cameras:
+- id: cam0
+  image_width: 1280
+  image_height: 1088
+  parameters:
+    model: double-sphere
+    parameters:
+      fx: 816.2164480807926
+      fy: 815.8628701759399
+      cx: 643.276711658112
+      cy: 541.7718726374234
+      xi: 0.25
+      alpha: 0.5
+- id: cam1
+  image_width: 1280
+  image_height: 1088
+  parameters:
+    model: double-sphere
+    parameters:
+      fx: 591.5120954984717
+      fy: 591.6149196692071
+      cx: 652.3989433033624
+      cy: 530.8907946319076
+      xi: 0.25
+      alpha: 0.5
+- id: cam2
+  image_width: 1280
+  image_height: 1088
+  parameters:
+    model: double-sphere
+    parameters:
+      fx: 817.4367537572185
+      fy: 817.1955835440976
+      cx: 643.0890349377597
+      cy: 543.3002371499857
+      xi: 0.25
+      alpha: 0.5
+- id: cam3
+  image_width: 1280
+  image_height: 1088
+  parameters:
+    model: double-sphere
+    parameters:
+      fx: 591.7407608451894
+      fy: 591.1782822157826
+      cx: 643.6216024530048
+      cy: 536.5913424088526
+      xi: 0.25
+      alpha: 0.5
