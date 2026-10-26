@@ -110,9 +110,23 @@ fn unknown_fields_are_rejected() {
     assert!(RunSettings::load(&path).is_err());
 }
 
+fn visual_settings(refine_intrinsics: bool) -> RunSettings {
+    let mut settings = RunSettings::load(Path::new("config/calibration.yaml")).unwrap();
+    settings.source.imu_topic = None;
+    settings.calibration = CalibrationConfig::MultiCamera {
+        reference_camera: settings.cameras[0].id.clone(),
+        refine_intrinsics,
+        initial_intrinsics: Default::default(),
+        max_closure_rotation_deg: 2.0,
+        max_closure_translation_m: 0.05,
+    };
+    settings.solver.point_rejection_px = Some(6.0);
+    settings
+}
+
 #[test]
 fn automatic_intrinsic_seed_is_valid_when_refinement_is_enabled() {
-    let source = fs::read_to_string("config/calibration.yaml").unwrap();
+    let source = serde_yaml::to_string(&visual_settings(true)).unwrap();
     let (_directory, path) = write_settings("automatic.yaml", &source);
     let settings = RunSettings::load(&path).unwrap();
     let CalibrationConfig::MultiCamera {
@@ -126,20 +140,19 @@ fn automatic_intrinsic_seed_is_valid_when_refinement_is_enabled() {
 
 #[test]
 fn fixed_intrinsics_require_a_prior() {
-    let source = fs::read_to_string("config/calibration.yaml")
-        .unwrap()
-        .replace("refine_intrinsics: true", "refine_intrinsics: false");
+    let source = serde_yaml::to_string(&visual_settings(false)).unwrap();
     let (_directory, path) = write_settings("fixed-without-prior.yaml", &source);
     assert!(RunSettings::load(&path).is_err());
 }
 
 #[test]
 fn single_camera_mode_rejects_multiple_selected_topics() {
-    let source = fs::read_to_string("config/calibration.yaml").unwrap();
-    let single = source.replace(
-        "calibration:\n  type: multi_camera\n  reference_camera: cam0\n  refine_intrinsics: true\n  max_closure_rotation_deg: 2.0\n  max_closure_translation_m: 0.05",
-        "calibration:\n  type: single_camera\n  camera: cam0",
-    );
+    let mut settings = visual_settings(true);
+    settings.calibration = CalibrationConfig::SingleCamera {
+        camera: settings.cameras[0].id.clone(),
+        initial_intrinsics: Default::default(),
+    };
+    let single = serde_yaml::to_string(&settings).unwrap();
     let (_directory, path) = write_settings("single.yaml", &single);
     assert!(RunSettings::load(&path).is_err());
 }

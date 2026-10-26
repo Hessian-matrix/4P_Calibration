@@ -8,7 +8,7 @@ use anyhow::{Context, Result, ensure};
 use ccl_calib::camera::continuous_time::{
     ContinuousTimeCalibrationRequest, ContinuousTimeCalibrationResult,
     ContinuousTimeInitializationRequest, ContinuousTimeSolverConfig, calibrate_continuous_time,
-    initialize_continuous_time,
+    initialize_continuous_time, supported_camera_interval,
 };
 use ccl_calib::camera::inertial::{
     ImuBias, ImuNoise, ImuSequence, IntegrationConfig as CoreIntegrationConfig,
@@ -331,7 +331,12 @@ fn solve_multi(
     let mut cameras = initial_cameras(config, detected, &indices, initial)?;
     let observations = build_observations(target, &detected.synchronized_views, None)?;
     if initial.path.is_none() {
-        cameras = calibrate_automatic_intrinsics(config, &cameras, &observations, control)?;
+        cameras = calibrate_automatic_intrinsics(
+            config,
+            &cameras,
+            &observations.iter().map(Vec::as_slice),
+            control,
+        )?;
     }
     let shared = shared_views(&observations);
     let reference_index = camera_index(config, reference_camera)?;
@@ -427,24 +432,25 @@ fn solve_inertial(
     let synchronized_observations = build_observations(target, &detected.synchronized_views, None)?;
     // Approximate synchronization exists only for the visual rig seed (and for the
     // preintegration path, whose shared views are inherently simultaneous). Continuous-time
-    // intrinsic seeding and the joint solve consume every exact per-camera observation.
+    // intrinsic seeding and the joint solve consume exact per-camera observations within fixed IMU support.
     let exact_observations = continuous_time
         .then(|| build_observations(target, &detected.views, None))
         .transpose()?;
-    if initial.path.is_none() {
+    if initial.path.is_none() && !continuous_time {
         stage("solve_intrinsics");
-        let intrinsic_observations = exact_observations
-            .as_ref()
-            .unwrap_or(&synchronized_observations);
-        cameras =
-            calibrate_automatic_intrinsics(config, &cameras, intrinsic_observations, control)?;
+        cameras = calibrate_automatic_intrinsics(
+            config,
+            &cameras,
+            &synchronized_observations.iter().map(Vec::as_slice),
+            control,
+        )?;
     }
     run.log(
         "INFO",
         if initial.path.is_some() {
             "using caller-supplied intrinsics as the seed; the visual rig refines them before the inertial stage freezes them"
         } else {
-            "using automatically calibrated intrinsic seeds; the visual rig refines them before the inertial stage freezes them"
+            "using automatic intrinsic initialization before visual rig refinement; continuous-time seeding uses only the cropped camera support"
         },
     )?;
     let origin = detected
@@ -548,6 +554,82 @@ fn solve_continuous_inertial(
     stage: &dyn Fn(&'static str),
     run: &RunContext,
 ) -> Result<(CalibrationOutput, SolveSummary)> {
+    // 固定观测集覆盖整个时差搜索区间；外围 IMU 保留，不能随试探时差增删因子。
+    let (camera_start_s, camera_end_s) = supported_camera_interval(
+        imu,
+        core_time_offset(time_offset_config, None),
+        imu_config.integration.max_gap_s,
+    )?;
+    let retained = |views: &[TimedView<'_>]| {
+        views.partition_point(|v| v.time.seconds() < camera_start_s)
+            ..views.partition_point(|v| v.time.seconds() <= camera_end_s)
+    };
+    ensure!(
+        !exact_views.windows(2).any(|w| w[0].time >= w[1].time)
+            && !seed_views.windows(2).any(|w| w[0].time >= w[1].time),
+        "continuous-time observations must be strictly time ordered"
+    );
+    let exact_range = retained(exact_views);
+    let seed_range = retained(seed_views);
+    let camera_counts = config
+        .cameras
+        .iter()
+        .enumerate()
+        .map(|(index, camera)| {
+            let count = |views: &[TimedView<'_>]| {
+                let mut frames = 0usize;
+                let mut points = 0usize;
+                for view in views {
+                    for observation in view.observations {
+                        if observation.camera_index == index {
+                            frames += 1;
+                            points += observation.points.len();
+                        }
+                    }
+                }
+                (frames, points)
+            };
+            let (input_frames, input_points) = count(exact_views);
+            let (used_frames, used_points) = count(&exact_views[exact_range.clone()]);
+            serde_json::json!({"camera": camera.id, "input_frames": input_frames,
+            "input_points": input_points, "used_frames": used_frames, "used_points": used_points,
+            "cropped_frames": input_frames-used_frames, "cropped_points": input_points-used_points})
+        })
+        .collect::<Vec<_>>();
+    run.write_yaml(
+        Path::new("time_support.yaml"),
+        &serde_json::json!({
+            "camera_start_s": camera_start_s, "camera_end_s": camera_end_s,
+            "time_origin_ns": detected.time_origin_ns.map(|t| t.to_string()),
+            "imu_samples": imu.samples().len(), "cameras": camera_counts,
+            "input_seed_views": seed_views.len(), "used_seed_views": seed_range.len(),
+            "optimizer": "basalt"
+        }),
+    )?;
+    run.log("INFO", &format!(
+        "continuous_time support=[{camera_start_s:.9},{camera_end_s:.9}] exact_views={}/{} seed_views={}/{} optimizer=basalt",
+        exact_range.len(), exact_views.len(), seed_range.len(), seed_views.len()
+    ))?;
+    let exact_views = &exact_views[exact_range];
+    let seed_views = &seed_views[seed_range];
+    ensure!(
+        exact_views.len() >= 5 && seed_views.len() >= 5,
+        "insufficient camera views after complete time-offset support cropping"
+    );
+    let automatic_intrinsics = matches!(&config.calibration,
+        CalibrationConfig::MultiCameraImu { initial_intrinsics, .. } if initial_intrinsics.path.is_none());
+    let calibrated_cameras = if automatic_intrinsics {
+        stage("solve_intrinsics");
+        Some(calibrate_automatic_intrinsics(
+            config,
+            cameras,
+            &exact_views.iter().map(|view| view.observations),
+            control,
+        )?)
+    } else {
+        None
+    };
+    let cameras = calibrated_cameras.as_deref().unwrap_or(cameras);
     let initial_offset_s = match time_offset_config {
         TimeOffsetConfig::Fixed { value_s } => value_s,
         TimeOffsetConfig::Estimate { initial_s, .. } => initial_s,
@@ -563,15 +645,17 @@ fn solve_continuous_inertial(
             seed_views,
             imu,
             reference_camera,
-            // The initializer fits spline support over the full offset bounds while using the
-            // initial offset for gyro alignment; the downstream second pass estimates freely
-            // inside those same bounds.
+            // All retained exposures are supported for the full offset range. The
+            // initializer covers every IMU sample and uses the initial offset for alignment.
             time_offset: core_time_offset(time_offset_config, None),
             knot_interval_s: imu_config.continuous_time.knot_interval_s,
             max_control_poses: imu_config.integration.max_samples,
             initial_imu_calibration,
         },
-        solver_config,
+        ContinuousTimeSolverConfig {
+            solver: joint_solver(config),
+            ..solver_config
+        },
         control,
     )
     .context("direct visual/gyro continuous-time initialization failed")?;
@@ -829,10 +913,10 @@ fn shared_views<'a>(observations: &'a [Vec<CameraObservation<'a>>]) -> Vec<Share
         .collect()
 }
 
-fn calibrate_automatic_intrinsics(
+fn calibrate_automatic_intrinsics<'a>(
     config: &RunSettings,
     cameras: &[CameraParameters],
-    observations: &[Vec<CameraObservation<'_>>],
+    observations: &(impl Iterator<Item = &'a [CameraObservation<'a>]> + Clone),
     control: &SolveControl<'_>,
 ) -> Result<Vec<CameraParameters>> {
     cameras
@@ -840,18 +924,21 @@ fn calibrate_automatic_intrinsics(
         .enumerate()
         .map(|(camera_index, &initial)| {
             let camera_observations = observations
-                .iter()
+                .clone()
                 .filter_map(|view| {
                     view.iter()
                         .find(|observation| observation.camera_index == camera_index)
                         .cloned()
                         .map(|mut observation| {
                             observation.camera_index = 0;
-                            vec![observation]
+                            [observation]
                         })
                 })
                 .collect::<Vec<_>>();
-            let views = shared_views(&camera_observations);
+            let views = camera_observations
+                .iter()
+                .map(|observations| SharedView { observations })
+                .collect::<Vec<_>>();
             let result = ccl_calib::camera::rig::calibrate_camera_rig(
                 &CameraRigCalibrationRequest {
                     cameras: &[initial],

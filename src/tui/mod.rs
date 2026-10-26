@@ -1238,7 +1238,7 @@ impl App {
                 }
                 self.draft.toggle_image_topic(&topic);
                 self.retain_topic_row(&topic);
-                "相机 topic 已切换".clone_into(&mut self.state);
+                self.state = format!("相机 topic 已切换；自动模式：{}", self.draft.mode.title());
             }
             FieldId::CameraReference(index) => {
                 if let Some(camera) = self.draft.cameras.get(*index) {
@@ -1254,7 +1254,7 @@ impl App {
                     option.clone()
                 };
                 self.draft.set_imu_topic(next);
-                "IMU topic 已更新（模式保持不变）".clone_into(&mut self.state);
+                self.state = format!("IMU topic 已更新；自动模式：{}", self.draft.mode.title());
             }
             _ => {}
         }

@@ -42,7 +42,7 @@ calibration:
   initial_intrinsics:
     path: config/intrinsics/baton-bag-ds.yaml
   # Explicit comparison setting: release time together with the IMU response.
-  # Explicit search bounds, not an IMU-coverage requirement or a measured timing prior.
+  # Search bounds also define the fixed IMU-supported camera crop; not a measured timing prior.
   time_offset:
     type: estimate
     initial_s: 0.0

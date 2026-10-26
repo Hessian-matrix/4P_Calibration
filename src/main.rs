@@ -7,9 +7,18 @@ use four_p_calibration::{runner, tui};
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let settings = cli
-        .config
-        .as_deref()
+    let default_config = std::path::Path::new("config/calibration.yaml");
+    let config = match cli.config.as_deref() {
+        Some(path) => Some(path),
+        None if default_config
+            .try_exists()
+            .context("check default configuration")? =>
+        {
+            Some(default_config)
+        }
+        None => None,
+    };
+    let settings = config
         .map(RunSettings::load)
         .transpose()
         .context("load run settings")?;

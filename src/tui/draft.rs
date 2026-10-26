@@ -711,6 +711,7 @@ impl Draft {
                 self.reference_id = self.cameras[0].id.clone();
             }
         }
+        self.infer_mode();
         self.touch();
     }
 
@@ -731,7 +732,19 @@ impl Draft {
 
     pub fn set_imu_topic(&mut self, topic: Option<String>) {
         self.imu_topic = topic;
+        self.infer_mode();
         self.touch();
+    }
+
+    fn infer_mode(&mut self) {
+        let mode = if self.imu_topic.is_some() {
+            CalibrationMode::MultiCameraImu
+        } else if self.cameras.len() > 1 {
+            CalibrationMode::MultiCamera
+        } else {
+            CalibrationMode::SingleCamera
+        };
+        self.set_mode(mode);
     }
 
     pub fn set_reference_to_id(&mut self, id: String) {
@@ -1368,16 +1381,22 @@ mod tests {
     }
 
     #[test]
-    fn selecting_imu_topic_never_switches_mode() {
+    fn topic_selection_updates_mode_in_both_directions() {
         let mut draft = Draft::from_settings(&settings());
+        draft.toggle_image_topic("/cam1/image_raw");
+        assert_eq!(draft.mode, CalibrationMode::MultiCamera);
+        draft.set_imu_topic(Some("/imu".to_owned()));
+        assert_eq!(draft.mode, CalibrationMode::MultiCameraImu);
+        assert_eq!(
+            draft.to_settings().unwrap().source.imu_topic.as_deref(),
+            Some("/imu")
+        );
+        draft.set_imu_topic(None);
+        assert_eq!(draft.mode, CalibrationMode::MultiCamera);
+        draft.toggle_image_topic("/cam1/image_raw");
         assert_eq!(draft.mode, CalibrationMode::SingleCamera);
-
-        draft.imu_topic = Some("/imu".to_owned());
-
-        assert_eq!(draft.mode, CalibrationMode::SingleCamera);
-        let rebuilt = draft.to_settings().unwrap();
-        assert_eq!(rebuilt.source.imu_topic, None);
-        assert_eq!(draft.imu_topic.as_deref(), Some("/imu"));
+        draft.set_imu_topic(Some("/imu".to_owned()));
+        assert_eq!(draft.mode, CalibrationMode::MultiCameraImu);
     }
 
     #[test]

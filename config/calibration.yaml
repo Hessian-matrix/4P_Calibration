@@ -1,11 +1,33 @@
+# 离线标定配置：当前为四路 Double Sphere 相机 + IMU 连续时间联合标定。
+# 本文件包含输入路径和求解设置，不是最终标定结果；结果在 runs/<本次运行>/result/。
+# TUI：cargo run -- --config config/calibration.yaml
+# 无 TUI：cargo run --release -- --no-tui --config config/calibration.yaml
+# 相对路径按启动时的工作目录解析，不是相对于本 YAML 的目录。
+# YAML 批处理的 calibration.type 必须显式填写；话题自动推断属于 TUI 选择交互。
+# 模板均为注释；使用时替换对应配置块，不要追加重复键。未知字段会被拒绝。
+
 source:
+  # bag 文件或 ROS2 SQLite bag 目录；换数据时同时检查下面的传感器话题。
   path: /Users/sosilent/Downloads/calib_ext.bag
+  # 可选：ros1_v2（ROS1 .bag）、ros2_mcap（.mcap）、ros2_sqlite3（.db3 或目录）。
+  # 格式必须与数据一致；解析失败不会自动尝试另一种格式。
   format: ros1_v2
+  # sensor_msgs/Imu 话题；纯视觉模板应设为 null。
+  # gyro 单位 rad/s，accelerometer 为比力 m/s²；标定时间使用 header.stamp。
   imu_topic: /imu/data
   synchronization:
+    # 近同步配对容差，单位 ns；2000000 = 2 ms，不是时差估计范围。
     max_delta_ns: 2000000
+    # true：组内所有相机均须存在原始曝光；不要求同时检测到标定板。
+    # false：允许部分相机缺帧。连续时间残差仍使用各帧自身的精确曝光时刻。
     require_all_cameras: false
 cameras:
+# id 和 topic 均须唯一；参考相机字段引用 id，不是 topic。
+# 相机模型可选（每路独立）：
+#   double-sphere、kannala-brandt4、extended-unified、pinhole-none、
+#   pinhole-radtan5、pinhole-radtan8、pinhole-d12。
+# 更换模型时，文件内参初值必须同模型；不能直接重命名参数。
+# Image / CompressedImage 话题名取决于实际 bag，本配置使用压缩图像。
 - id: cam0
   topic: /camera0/image/compressed
   model: double-sphere
@@ -19,109 +41,138 @@ cameras:
   topic: /camera3/image/compressed
   model: double-sphere
 target:
+  # 当前目标类型为 aprilgrid；几何必须与实物一致，尺寸误差会影响平移尺度。
   type: aprilgrid
+  # 可选：tag16h5、tag25h9、tag36h10、tag36h11。
   family: tag36h11
+  # tag 黑边宽度（bit 单位），必须匹配打印图案。
   border_bits: 2
+  # tag 边长和相邻 tag 间隙，均为米；tag_gap_m 是长度，不是间隙比例。
   tag_size_m: 0.088
   tag_gap_m: 0.0264
   id_rows_front_view_left_to_right:
-  - - 30
-    - 31
-    - 32
-    - 33
-    - 34
-    - 35
-  - - 24
-    - 25
-    - 26
-    - 27
-    - 28
-    - 29
-  - - 18
-    - 19
-    - 20
-    - 21
-    - 22
-    - 23
-  - - 12
-    - 13
-    - 14
-    - 15
-    - 16
-    - 17
-  - - 6
-    - 7
-    - 8
-    - 9
-    - 10
-    - 11
-  - - 0
-    - 1
-    - 2
-    - 3
-    - 4
-    - 5
-  decoded_corner_to_front_corner:
-  - 2
-  - 3
-  - 0
-  - 1
+  # 从板正面看到的二维 ID 布局，逐行填写、每行从左到右；不可随意重排。
+  - [30, 31, 32, 33, 34, 35]
+  - [24, 25, 26, 27, 28, 29]
+  - [18, 19, 20, 21, 22, 23]
+  - [12, 13, 14, 15, 16, 17]
+  - [6, 7, 8, 9, 10, 11]
+  - [0, 1, 2, 3, 4, 5]
+  # 解码角点索引到板正面几何角点的排列，必须是 0..3 的排列。
+  # 当前板使用 [2, 3, 0, 1]；换板须核对方向，不要仅为减小残差修改。
+  decoded_corner_to_front_corner: [2, 3, 0, 1]
 detector:
+  # 允许的解码 Hamming 纠错量；0 为严格匹配。
   max_hamming: 0
   refinement:
+    #亚像素细化方法 可选：saddle（当前十字细化）、outer_contour（外轮廓）、disabled（不细化）。
     method: saddle
     max_iterations: 20
+  # 检测资源预算；耗尽会显式报错，不静默截断候选。
+  # 高分辨率图像可能需要更大的 max_pixels / max_clusters。
   budgets:
     max_pixels: 16777216
     max_clusters: 16384
     max_candidates: 512
 calibration:
+  # 模式可选：single_camera / multi_camera / multi_camera_imu。
+  # 三者字段不同；切换到纯视觉时按文件末尾模板整体替换 calibration 块。
   type: multi_camera_imu
+  # 可选：continuous_time（B 样条）或 preintegration（预积分）。
+  # 预积分须使用单位轴矩阵、refine: false，并将 point_rejection_px 改为正数。
   method: continuous_time
   visual_reference_camera: cam0
+  # 可选内参初值（省略则自动初始化）；文件需匹配 camera id、模型和图像尺寸。
+  # initial_intrinsics:
+  #   path: config/intrinsics/1-bag-ds.yaml
+  # 此路径仅是格式示例，不能把其他设备的内参直接当作当前设备真值。
   time_offset:
+    # 方向：t_imu = t_camera + delta_t，单位秒。
+    # 当前估计时差；固定时差时，整体替换 time_offset 块为：
+    # time_offset:
+    #   type: fixed
+    #   value_s: 0.0
     type: estimate
     initial_s: 0.0
     minimum_s: -0.1
     maximum_s: 0.1
+    # 初始化搜索步数；不是最终优化迭代次数。
     initialization_steps: 11
   imu:
-    gravity_magnitude_m_s2: 9.7883
+    # 当地重力模长，单位 m/s²；不是待估计的重力方向。
+    gravity_magnitude_m_s2: 9.7883 #广州
     noise:
+      # 当前为工作配置值，不表示已测得设备噪声。应使用设备资料或独立测量。
+      # density 是噪声密度，不是单样本标准差；连续时间按实际采样间隔换算。
+      # bias_walk 为偏置随机游走参数；连续时间模型不含连续变化的 bias 轨迹。
       gyro_density_rad_s_sqrt_hz: 0.001
       accelerometer_density_m_s2_sqrt_hz: 0.001
       gyro_bias_walk_rad_s2_sqrt_hz: 0.00001
       accelerometer_bias_walk_m_s3_sqrt_hz: 0.00001
     integration:
+      # 当前积分方法仅支持 midpoint。
       method: midpoint
+      # IMU 相邻样本最大允许间隔（秒）；max_samples 为样本数量限制。
       max_gap_s: 0.02
       max_samples: 2000000
     axis_calibration:
+      # 仅连续时间支持轴参数精化；true 在第二阶段释放矩阵参数。
+      # false 保持下列矩阵固定，不代表已验证硬件轴误差为零。
+      # 约定 physical = A * raw - bias；矩阵逐行保存，bias 在校正物理坐标系。
+      # gyro：有限、非奇异、保向的 3×3 矩阵；accel：正对角下三角矩阵。
       refine: false
       gyro_calibrated_from_raw:
-      - - 1.0
-        - 0.0
-        - 0.0
-      - - 0.0
-        - 1.0
-        - 0.0
-      - - 0.0
-        - 0.0
-        - 1.0
+      - [1.0, 0.0, 0.0]
+      - [0.0, 1.0, 0.0]
+      - [0.0, 0.0, 1.0]
       accelerometer_calibrated_from_raw:
-      - - 1.0
-        - 0.0
-        - 0.0
-      - - 0.0
-        - 1.0
-        - 0.0
-      - - 0.0
-        - 0.0
-        - 1.0
+      - [1.0, 0.0, 0.0]
+      - [0.0, 1.0, 0.0]
+      - [0.0, 0.0, 1.0]
     continuous_time:
+      # 四次 B 样条节点间隔（秒）；0.01 = 10 ms，不是图像/IMU 重采样周期。
+      # 更小间隔增加轨迹自由度及计算量，不保证结果更好。
       knot_interval_s: 0.01
 solver:
+  # LM 最大迭代预算；到达上限不等于数值收敛，须检查 solve.yaml 的诊断。
   max_iterations: 1000
+  # 像点噪声标准差（px），用于残差白化。
   pixel_sigma: 1.0
+  # Huber 转折为白化残差单位；对应像素阈值 = pixel_sigma × huber_delta。
   huber_delta: 3.0
+  # null：仅 Huber 加权，不做硬剔除，仅连续时间模式支持。
+  # 正数（例如 6.0）：按像素阈值剔除观测；省略该键默认 6.0。
   point_rejection_px: null
+
+# ===== 可复制的模式模板（替换整个 calibration 块） =====
+# A. 单相机内参：cameras 中只保留 cam0，source.imu_topic: null，
+#    solver.point_rejection_px: 6.0。
+# calibration:
+#   type: single_camera
+#   camera: cam0
+#   # 可省略 initial_intrinsics，使用自动初值：
+#   # initial_intrinsics:
+#   #   path: runs/<已验收运行>/result/calibration.yaml
+#
+# B. 多相机纯视觉：至少两路相机，source.imu_topic: null，
+#    solver.point_rejection_px: 6.0。
+# calibration:
+#   type: multi_camera
+#   reference_camera: cam0
+#   refine_intrinsics: true
+#   max_closure_rotation_deg: 2.0
+#   max_closure_translation_m: 0.05
+#   # 上面为外参图闭环初始化容差（度、米），不是重投影误差阈值。
+#   # 若 refine_intrinsics: false，必须提供有效文件内参：
+#   # initial_intrinsics:
+#   #   path: runs/<已验收运行>/result/calibration.yaml
+#
+# C. 多相机 + IMU：沿用本文件 calibration 块，至少两路相机并绑定 IMU。
+#    continuous_time：保留当前设置；可按需求开启轴精化或固定时差。
+#    preintegration：method 改为 preintegration，轴矩阵保持单位阵且 refine: false，
+#    point_rejection_px 改为 6.0；预积分还要求 IMU 覆盖视觉时间及时差边界。
+#    imu.continuous_time 块仅用于连续时间，可在预积分配置中省略。
+#
+# 其他现成配置：config/presets/1-bag-ds.yaml（四相机纯视觉）、
+# config/presets/baton-bag-ds.yaml、baton-bag-ds-continuous-basalt.yaml（双相机+IMU）。
+# 这些预设绑定不同设备/数据/板几何；切勿只替换 bag 路径就直接套用。

@@ -215,7 +215,7 @@ dependencies = [
 
 [[package]]
 name = "ccl_calib"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ccl_geometry",
  "ccl_image",
@@ -237,7 +237,7 @@ dependencies = [
 
 [[package]]
 name = "ccl_image"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "calib-targets-aruco",
  "nalgebra",
@@ -247,7 +247,7 @@ dependencies = [
 
 [[package]]
 name = "ccl_rosbag"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bzip2-rs",
  "ccl_calib",
