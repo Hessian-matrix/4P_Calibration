@@ -2,7 +2,7 @@
 name = "four-p-calibration"
 description = "Offline multi-camera and camera-IMU calibration shell"
 edition = "2024"
-version = "0.1.0"
+version = "0.1.1"
 rust-version = "1.98"
 license = "UNLICENSED"
 publish = false

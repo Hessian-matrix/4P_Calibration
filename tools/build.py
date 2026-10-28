@@ -70,7 +70,7 @@ def validate_bundle(bundle: Path) -> dict[str, str]:
         if manifest.get(key) != expected:
             raise SystemExit(f"bundle {key} must be {expected!r}, got {manifest.get(key)!r}")
     current = rustc_info()
-    for key in ("release", "commit_hash", "commit_date", "host", "llvm_version"):
+    for key in ("release", "commit_hash", "commit_date", "llvm_version"):
         if manifest.get(f"rustc_{key}") != current.get(key):
             raise SystemExit(f"rustc {key} does not match bundle manifest")
     target = current["host"]
@@ -98,7 +98,8 @@ def main() -> int:
     manifest = validate_bundle(bundle)
     env = os.environ.copy()
     env["FOUR_P_CORELIB_BUNDLE"] = str(bundle)
-    env["RUSTC_WRAPPER"] = str((Path(__file__).parent / "corelib-rustc-wrapper.py").resolve())
+    wrapper_name = "corelib-rustc-wrapper.cmd" if os.name == "nt" else "corelib-rustc-wrapper.py"
+    env["RUSTC_WRAPPER"] = str((Path(__file__).parent / wrapper_name).resolve())
     for key in ("version", "git_commit", "target", "rustc_release", "workspace_features"):
         env[f"FOUR_P_CORELIB_{key.upper()}"] = manifest[key]
     env["FOUR_P_CORELIB_ARTIFACT_SHA256"] = (
