@@ -1,9 +1,11 @@
 use std::fs;
 use std::path::Path;
 
-use ccl_calib::camera::{CameraModel, CameraParameters, PinholeModel};
 
-use crate::export::{AcceptanceStatus, CalibrationOutput, NamedPose, load_result};
+use crate::export::{
+    AcceptanceStatus, CalibrationOutput, CameraParametersOutput, NamedPose, PinholeModelOutput,
+    load_result,
+};
 
 use super::task::{self, Task};
 
@@ -510,79 +512,46 @@ fn run_status_label(task: &Task) -> String {
     label.to_owned()
 }
 
-fn focal_center(parameters: &CameraParameters) -> (f64, f64, f64, f64) {
+fn focal_center(parameters: &CameraParametersOutput) -> (f64, f64, f64, f64) {
     match parameters {
-        CameraParameters::Pinhole(parameters) => (
-            parameters.fx(),
-            parameters.fy(),
-            parameters.cx(),
-            parameters.cy(),
-        ),
-        CameraParameters::KannalaBrandt4(parameters) => {
-            (parameters.fx, parameters.fy, parameters.cx, parameters.cy)
-        }
-        CameraParameters::ExtendedUnified(parameters) => {
-            (parameters.fx, parameters.fy, parameters.cx, parameters.cy)
-        }
-        CameraParameters::DoubleSphere(parameters) => {
-            (parameters.fx, parameters.fy, parameters.cx, parameters.cy)
-        }
+        CameraParametersOutput::Pinhole(value) => (value.fx, value.fy, value.cx, value.cy),
+        CameraParametersOutput::KannalaBrandt4(value) => (value.fx, value.fy, value.cx, value.cy),
+        CameraParametersOutput::ExtendedUnified(value) => (value.fx, value.fy, value.cx, value.cy),
+        CameraParametersOutput::DoubleSphere(value) => (value.fx, value.fy, value.cx, value.cy),
     }
 }
 
-fn parameter_rows(parameters: &CameraParameters) -> Vec<(&'static str, String)> {
+fn parameter_rows(parameters: &CameraParametersOutput) -> Vec<(&'static str, String)> {
     let value = |value: f64| format!("{value:.9}");
     match parameters {
-        CameraParameters::Pinhole(parameters) => {
+        CameraParametersOutput::Pinhole(parameters) => {
             let mut rows = vec![
-                ("fx", value(parameters.fx())),
-                ("fy", value(parameters.fy())),
-                ("cx", value(parameters.cx())),
-                ("cy", value(parameters.cy())),
-                (
-                    "distortion",
-                    parameters
-                        .model()
-                        .id()
-                        .trim_start_matches("pinhole-")
-                        .to_owned(),
-                ),
+                ("fx", value(parameters.fx)), ("fy", value(parameters.fy)),
+                ("cx", value(parameters.cx)), ("cy", value(parameters.cy)),
+                ("distortion", pinhole_model_id(parameters.model).to_owned()),
             ];
-            for (name, coefficient) in parameters
-                .model()
-                .distortion_names()
-                .iter()
-                .zip(parameters.active_coefficients())
+            for (name, coefficient) in pinhole_distortion_names(parameters.model)
+                .iter().zip(parameters.coefficients.iter().copied())
             {
                 rows.push((*name, value(coefficient)));
             }
             rows
         }
-        CameraParameters::KannalaBrandt4(parameters) => vec![
-            ("fx", value(parameters.fx)),
-            ("fy", value(parameters.fy)),
-            ("cx", value(parameters.cx)),
-            ("cy", value(parameters.cy)),
-            ("k1", value(parameters.k1)),
-            ("k2", value(parameters.k2)),
-            ("k3", value(parameters.k3)),
-            ("k4", value(parameters.k4)),
+        CameraParametersOutput::KannalaBrandt4(parameters) => vec![
+            ("fx", value(parameters.fx)), ("fy", value(parameters.fy)),
+            ("cx", value(parameters.cx)), ("cy", value(parameters.cy)),
+            ("k1", value(parameters.k1)), ("k2", value(parameters.k2)),
+            ("k3", value(parameters.k3)), ("k4", value(parameters.k4)),
         ],
-        CameraParameters::ExtendedUnified(parameters) => vec![
-            ("fx", value(parameters.fx)),
-            ("fy", value(parameters.fy)),
-            ("cx", value(parameters.cx)),
-            ("cy", value(parameters.cy)),
-            ("alpha", value(parameters.alpha)),
-            ("beta", value(parameters.beta)),
+        CameraParametersOutput::ExtendedUnified(parameters) => vec![
+            ("fx", value(parameters.fx)), ("fy", value(parameters.fy)),
+            ("cx", value(parameters.cx)), ("cy", value(parameters.cy)),
+            ("alpha", value(parameters.alpha)), ("beta", value(parameters.beta)),
         ],
-        CameraParameters::DoubleSphere(parameters) => vec![
-            ("fx", value(parameters.fx)),
-            ("fy", value(parameters.fy)),
-            ("cx", value(parameters.cx)),
-            ("cy", value(parameters.cy)),
-            ("xi", value(parameters.xi)),
-            ("alpha", value(parameters.alpha)),
+        CameraParametersOutput::DoubleSphere(parameters) => vec![
+            ("fx", value(parameters.fx)), ("fy", value(parameters.fy)),
+            ("cx", value(parameters.cx)), ("cy", value(parameters.cy)),
+            ("xi", value(parameters.xi)), ("alpha", value(parameters.alpha)),
         ],
     }
 }
@@ -603,16 +572,44 @@ fn acceptance_label(acceptance: AcceptanceStatus) -> &'static str {
     }
 }
 
-fn camera_parameter_kind(parameters: &ccl_calib::camera::CameraParameters) -> &'static str {
-    match parameters.model() {
-        CameraModel::Pinhole(PinholeModel::None) => "PinholeNone",
-        CameraModel::Pinhole(PinholeModel::Radtan5) => "PinholeRadtan5",
-        CameraModel::Pinhole(PinholeModel::Radtan8) => "PinholeRadtan8",
-        CameraModel::Pinhole(PinholeModel::D12) => "PinholeD12",
-        CameraModel::Pinhole(_) => "Pinhole(其它畸变组合)",
-        CameraModel::KannalaBrandt4 => "KannalaBrandt4",
-        CameraModel::DoubleSphere => "DoubleSphere",
-        CameraModel::ExtendedUnified => "ExtendedUnified",
+fn camera_parameter_kind(parameters: &CameraParametersOutput) -> &'static str {
+    match parameters {
+        CameraParametersOutput::Pinhole(value) => match value.model {
+            PinholeModelOutput::None => "PinholeNone",
+            PinholeModelOutput::Radtan5 => "PinholeRadtan5",
+            PinholeModelOutput::Radtan8 => "PinholeRadtan8",
+            PinholeModelOutput::D12 => "PinholeD12",
+            _ => "Pinhole(其它畸变组合)",
+        },
+        CameraParametersOutput::KannalaBrandt4(_) => "KannalaBrandt4",
+        CameraParametersOutput::DoubleSphere(_) => "DoubleSphere",
+        CameraParametersOutput::ExtendedUnified(_) => "ExtendedUnified",
+    }
+}
+
+fn pinhole_model_id(model: PinholeModelOutput) -> &'static str {
+    match model {
+        PinholeModelOutput::None => "none", PinholeModelOutput::Radtan5 => "radtan5",
+        PinholeModelOutput::Radtan8 => "radtan8", PinholeModelOutput::D12 => "d12",
+        PinholeModelOutput::Radtan5Tilted => "radtan5-tilted",
+        PinholeModelOutput::Radtan8Tilted => "radtan8-tilted",
+        PinholeModelOutput::Radtan5ThinPrism => "radtan5-thinprism",
+        PinholeModelOutput::Radtan5ThinPrismTilted => "radtan5-thinprism-tilted",
+        PinholeModelOutput::D12Tilted => "d12-tilted",
+    }
+}
+
+fn pinhole_distortion_names(model: PinholeModelOutput) -> &'static [&'static str] {
+    match model {
+        PinholeModelOutput::None => &[],
+        PinholeModelOutput::Radtan5 => &["k1", "k2", "p1", "p2", "k3"],
+        PinholeModelOutput::Radtan8 => &["k1", "k2", "p1", "p2", "k3", "k4", "k5", "k6"],
+        PinholeModelOutput::D12 => &["k1", "k2", "p1", "p2", "k3", "k4", "k5", "k6", "s1", "s2", "s3", "s4"],
+        PinholeModelOutput::Radtan5Tilted => &["k1", "k2", "p1", "p2", "k3", "tau_x", "tau_y"],
+        PinholeModelOutput::Radtan8Tilted => &["k1", "k2", "p1", "p2", "k3", "k4", "k5", "k6", "tau_x", "tau_y"],
+        PinholeModelOutput::Radtan5ThinPrism => &["k1", "k2", "p1", "p2", "k3", "s1", "s2", "s3", "s4"],
+        PinholeModelOutput::Radtan5ThinPrismTilted => &["k1", "k2", "p1", "p2", "k3", "s1", "s2", "s3", "s4", "tau_x", "tau_y"],
+        PinholeModelOutput::D12Tilted => &["k1", "k2", "p1", "p2", "k3", "k4", "k5", "k6", "s1", "s2", "s3", "s4", "tau_x", "tau_y"],
     }
 }
 

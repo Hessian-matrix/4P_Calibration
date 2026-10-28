@@ -4,7 +4,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
 use ccl_calib::camera::continuous_time::ImuAxisCalibration;
-use ccl_calib::camera::{CameraParameters, TargetGeometry};
+use ccl_calib::camera::{CameraModel, CameraParameters, PinholeModel, TargetGeometry};
 use ccl_geometry::Pose3;
 use serde::{Deserialize, Serialize};
 
@@ -54,7 +54,53 @@ pub struct CameraOutput {
     pub id: String,
     pub image_width: u32,
     pub image_height: u32,
-    pub parameters: CameraParameters,
+    pub parameters: CameraParametersOutput,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "model", content = "parameters", rename_all = "kebab-case")]
+pub enum CameraParametersOutput {
+    Pinhole(PinholeParametersOutput),
+    KannalaBrandt4(Kb4ParametersOutput),
+    ExtendedUnified(ExtendedUnifiedParametersOutput),
+    DoubleSphere(DoubleSphereParametersOutput),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PinholeParametersOutput {
+    pub model: PinholeModelOutput,
+    pub fx: f64,
+    pub fy: f64,
+    pub cx: f64,
+    pub cy: f64,
+    pub coefficients: Vec<f64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PinholeModelOutput {
+    None, Radtan5, Radtan8, D12, Radtan5Tilted, Radtan8Tilted,
+    Radtan5ThinPrism, Radtan5ThinPrismTilted, D12Tilted,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Kb4ParametersOutput {
+    pub fx: f64, pub fy: f64, pub cx: f64, pub cy: f64,
+    pub k1: f64, pub k2: f64, pub k3: f64, pub k4: f64,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtendedUnifiedParametersOutput {
+    pub fx: f64, pub fy: f64, pub cx: f64, pub cy: f64, pub alpha: f64, pub beta: f64,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DoubleSphereParametersOutput {
+    pub fx: f64, pub fy: f64, pub cx: f64, pub cy: f64, pub xi: f64, pub alpha: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -127,6 +173,97 @@ impl ImuAxisCalibrationOutput {
     }
 }
 
+impl CameraParametersOutput {
+    #[must_use]
+    pub fn from_core(parameters: CameraParameters) -> Self {
+        match parameters {
+            CameraParameters::Pinhole(value) => Self::Pinhole(PinholeParametersOutput {
+                model: PinholeModelOutput::from_core(value.model()),
+                fx: value.fx(), fy: value.fy(), cx: value.cx(), cy: value.cy(),
+                coefficients: value.active_coefficients(),
+            }),
+            CameraParameters::KannalaBrandt4(value) => Self::KannalaBrandt4(Kb4ParametersOutput {
+                fx: value.fx, fy: value.fy, cx: value.cx, cy: value.cy,
+                k1: value.k1, k2: value.k2, k3: value.k3, k4: value.k4,
+            }),
+            CameraParameters::ExtendedUnified(value) => Self::ExtendedUnified(ExtendedUnifiedParametersOutput {
+                fx: value.fx, fy: value.fy, cx: value.cx, cy: value.cy,
+                alpha: value.alpha, beta: value.beta,
+            }),
+            CameraParameters::DoubleSphere(value) => Self::DoubleSphere(DoubleSphereParametersOutput {
+                fx: value.fx, fy: value.fy, cx: value.cx, cy: value.cy,
+                xi: value.xi, alpha: value.alpha,
+            }),
+        }
+    }
+
+    pub fn to_core(&self) -> Result<CameraParameters> {
+        let parameters = match self {
+            Self::Pinhole(value) => CameraParameters::Pinhole(
+                ccl_calib::camera::PinholeParameters::new(
+                    value.model.core(), value.fx, value.fy, value.cx, value.cy, &value.coefficients,
+                )?,
+            ),
+            Self::KannalaBrandt4(value) => CameraParameters::KannalaBrandt4(
+                ccl_calib::camera::kannala_brandt4::Kb4Parameters {
+                    fx: value.fx, fy: value.fy, cx: value.cx, cy: value.cy,
+                    k1: value.k1, k2: value.k2, k3: value.k3, k4: value.k4,
+                },
+            ),
+            Self::ExtendedUnified(value) => CameraParameters::ExtendedUnified(
+                ccl_calib::camera::extended_unified::ExtendedUnifiedParameters {
+                    fx: value.fx, fy: value.fy, cx: value.cx, cy: value.cy,
+                    alpha: value.alpha, beta: value.beta,
+                },
+            ),
+            Self::DoubleSphere(value) => CameraParameters::DoubleSphere(
+                ccl_calib::camera::double_sphere::DoubleSphereParameters {
+                    fx: value.fx, fy: value.fy, cx: value.cx, cy: value.cy,
+                    xi: value.xi, alpha: value.alpha,
+                },
+            ),
+        };
+        parameters.validate()?;
+        Ok(parameters)
+    }
+
+    #[must_use]
+    pub const fn model(&self) -> CameraModel {
+        match self {
+            Self::Pinhole(value) => CameraModel::Pinhole(value.model.core()),
+            Self::KannalaBrandt4(_) => CameraModel::KannalaBrandt4,
+            Self::ExtendedUnified(_) => CameraModel::ExtendedUnified,
+            Self::DoubleSphere(_) => CameraModel::DoubleSphere,
+        }
+    }
+}
+
+impl PinholeModelOutput {
+    const fn from_core(model: PinholeModel) -> Self {
+        match model {
+            PinholeModel::None => Self::None, PinholeModel::Radtan5 => Self::Radtan5,
+            PinholeModel::Radtan8 => Self::Radtan8, PinholeModel::D12 => Self::D12,
+            PinholeModel::Radtan5Tilted => Self::Radtan5Tilted,
+            PinholeModel::Radtan8Tilted => Self::Radtan8Tilted,
+            PinholeModel::Radtan5ThinPrism => Self::Radtan5ThinPrism,
+            PinholeModel::Radtan5ThinPrismTilted => Self::Radtan5ThinPrismTilted,
+            PinholeModel::D12Tilted => Self::D12Tilted,
+        }
+    }
+
+    const fn core(self) -> PinholeModel {
+        match self {
+            Self::None => PinholeModel::None, Self::Radtan5 => PinholeModel::Radtan5,
+            Self::Radtan8 => PinholeModel::Radtan8, Self::D12 => PinholeModel::D12,
+            Self::Radtan5Tilted => PinholeModel::Radtan5Tilted,
+            Self::Radtan8Tilted => PinholeModel::Radtan8Tilted,
+            Self::Radtan5ThinPrism => PinholeModel::Radtan5ThinPrism,
+            Self::Radtan5ThinPrismTilted => PinholeModel::Radtan5ThinPrismTilted,
+            Self::D12Tilted => PinholeModel::D12Tilted,
+        }
+    }
+}
+
 impl CalibrationOutput {
     pub fn validate(&self) -> Result<()> {
         ensure!(
@@ -152,7 +289,7 @@ impl CalibrationOutput {
                 "invalid image size for {}",
                 camera.id
             );
-            camera.parameters.validate()?;
+            camera.parameters.to_core()?;
         }
         if let Some(reference) = &self.reference_camera {
             ensure!(

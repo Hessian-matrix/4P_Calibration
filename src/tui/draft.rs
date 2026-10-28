@@ -355,7 +355,7 @@ impl SolverDraft {
         };
         Self {
             max_iterations: solver.max_iterations.to_string(),
-            pixel_sigma: format_number(solver.pixel_sigma),
+            pixel_sigma: format_number(1.0),
             huber_delta: format_number(solver.huber_delta),
             point_rejection_px,
             rejection,
@@ -371,7 +371,6 @@ impl SolverDraft {
                 1_000,
                 errors,
             ),
-            pixel_sigma: parse_f64(&self.pixel_sigma, "solver.pixel_sigma", 1.0, errors),
             huber_delta: parse_f64(&self.huber_delta, "solver.huber_delta", 3.0, errors),
             point_rejection_px: match self.rejection {
                 RejectionPolicy::PixelThreshold => Some(parse_f64(
@@ -544,7 +543,7 @@ impl Draft {
                 ImuDraft::default(),
             ),
         };
-        Self {
+        let mut draft = Self {
             revision: 0,
             source_path: settings.source.path.to_string_lossy().into_owned(),
             format: settings.source.format,
@@ -571,7 +570,11 @@ impl Draft {
             target,
             detector,
             solver,
-        }
+        };
+        draft.solver.pixel_sigma = format_number(
+            settings.cameras.first().map_or(1.0, |camera| camera.pixel_sigma),
+        );
+        draft
     }
 
     pub fn touch(&mut self) {
@@ -673,6 +676,12 @@ impl Draft {
                     id: camera.id.clone(),
                     topic: camera.topic.clone(),
                     model: camera.model,
+                    pixel_sigma: parse_f64(
+                        &self.solver.pixel_sigma,
+                        "cameras[].pixel_sigma",
+                        1.0,
+                        &mut errors,
+                    ),
                 })
                 .collect(),
             target: self.target.to_config(&mut errors),
@@ -889,9 +898,11 @@ impl ImuDraft {
     fn from_config(imu: &ImuConfig) -> Self {
         Self {
             gravity_magnitude_m_s2: format_number(imu.gravity_magnitude_m_s2),
-            gyro_density_rad_s_sqrt_hz: format_number(imu.noise.gyro_density_rad_s_sqrt_hz),
+            gyro_density_rad_s_sqrt_hz: format_number(
+                imu.noise.gyro_covariance_rad2_s_hz[0][0].sqrt(),
+            ),
             accelerometer_density_m_s2_sqrt_hz: format_number(
-                imu.noise.accelerometer_density_m_s2_sqrt_hz,
+                imu.noise.accelerometer_covariance_m2_s4_hz[0][0].sqrt(),
             ),
             gyro_bias_walk_rad_s2_sqrt_hz: format_number(imu.noise.gyro_bias_walk_rad_s2_sqrt_hz),
             accelerometer_bias_walk_m_s3_sqrt_hz: format_number(
@@ -918,31 +929,35 @@ impl ImuDraft {
                 9.80665,
                 errors,
             ),
-            noise: ImuNoiseConfig {
-                gyro_density_rad_s_sqrt_hz: parse_f64(
+            noise: {
+                let gyro = parse_f64(
                     &self.gyro_density_rad_s_sqrt_hz,
                     "imu.noise.gyro_density_rad_s_sqrt_hz",
                     0.001,
                     errors,
-                ),
-                accelerometer_density_m_s2_sqrt_hz: parse_f64(
+                );
+                let accel = parse_f64(
                     &self.accelerometer_density_m_s2_sqrt_hz,
                     "imu.noise.accelerometer_density_m_s2_sqrt_hz",
                     0.01,
                     errors,
-                ),
-                gyro_bias_walk_rad_s2_sqrt_hz: parse_f64(
-                    &self.gyro_bias_walk_rad_s2_sqrt_hz,
-                    "imu.noise.gyro_bias_walk_rad_s2_sqrt_hz",
-                    0.00001,
-                    errors,
-                ),
-                accelerometer_bias_walk_m_s3_sqrt_hz: parse_f64(
-                    &self.accelerometer_bias_walk_m_s3_sqrt_hz,
-                    "imu.noise.accelerometer_bias_walk_m_s3_sqrt_hz",
-                    0.0001,
-                    errors,
-                ),
+                );
+                ImuNoiseConfig {
+                    gyro_covariance_rad2_s_hz: [[gyro * gyro, 0.0, 0.0], [0.0, gyro * gyro, 0.0], [0.0, 0.0, gyro * gyro]],
+                    accelerometer_covariance_m2_s4_hz: [[accel * accel, 0.0, 0.0], [0.0, accel * accel, 0.0], [0.0, 0.0, accel * accel]],
+                    gyro_bias_walk_rad_s2_sqrt_hz: parse_f64(
+                        &self.gyro_bias_walk_rad_s2_sqrt_hz,
+                        "imu.noise.gyro_bias_walk_rad_s2_sqrt_hz",
+                        0.00001,
+                        errors,
+                    ),
+                    accelerometer_bias_walk_m_s3_sqrt_hz: parse_f64(
+                        &self.accelerometer_bias_walk_m_s3_sqrt_hz,
+                        "imu.noise.accelerometer_bias_walk_m_s3_sqrt_hz",
+                        0.0001,
+                        errors,
+                    ),
+                }
             },
             integration: IntegrationConfig {
                 method: self.integration_method,
@@ -1317,6 +1332,7 @@ mod tests {
                 id: "cam0".to_owned(),
                 topic: "/cam0/image_raw".to_owned(),
                 model: CameraModelConfig::KannalaBrandt4,
+                pixel_sigma: 1.0,
             }],
             target: TargetConfig::default(),
             detector: DetectorConfig::default(),

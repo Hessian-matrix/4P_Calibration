@@ -1,8 +1,8 @@
 use ccl_calib::camera::{CalibrationImageSize, CameraModel, CameraParameters, PinholeModel};
 use ccl_geometry::Pose3;
 use four_p_calibration::export::{
-    AcceptanceStatus, CalibrationOutput, CameraOutput, ImuAxisCalibrationOutput, InertialOutput,
-    NamedPose, PoseOutput,
+    AcceptanceStatus, CalibrationOutput, CameraOutput, CameraParametersOutput,
+    ImuAxisCalibrationOutput, InertialOutput, NamedPose, PoseOutput,
 };
 
 fn camera() -> CameraOutput {
@@ -14,7 +14,7 @@ fn camera() -> CameraOutput {
         id: "cam0".to_owned(),
         image_width: size.width,
         image_height: size.height,
-        parameters,
+        parameters: CameraParametersOutput::from_core(parameters),
     }
 }
 

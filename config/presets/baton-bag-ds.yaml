@@ -9,9 +9,11 @@ cameras:
 - id: cam0
   topic: /baton_mini/image_left
   model: double-sphere
+  pixel_sigma: 1.0
 - id: cam1
   topic: /baton_mini/image_right
   model: double-sphere
+  pixel_sigma: 1.0
 target:
   type: aprilgrid
   family: tag36h11
@@ -50,8 +52,8 @@ calibration:
   imu:
     gravity_magnitude_m_s2: 9.80665
     noise:
-      gyro_density_rad_s_sqrt_hz: 0.001
-      accelerometer_density_m_s2_sqrt_hz: 0.01
+      gyro_covariance_rad2_s_hz: [[0.000001, 0.0, 0.0], [0.0, 0.000001, 0.0], [0.0, 0.0, 0.000001]]
+      accelerometer_covariance_m2_s4_hz: [[0.0001, 0.0, 0.0], [0.0, 0.0001, 0.0], [0.0, 0.0, 0.0001]]
       gyro_bias_walk_rad_s2_sqrt_hz: 0.00001
       accelerometer_bias_walk_m_s3_sqrt_hz: 0.0001
     integration:
@@ -60,6 +62,5 @@ calibration:
       max_samples: 2000000
 solver:
   max_iterations: 1000
-  pixel_sigma: 1.0
   huber_delta: 3.0
   point_rejection_px: 6.0

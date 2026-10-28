@@ -9,15 +9,19 @@ cameras:
 - id: cam0
   topic: /camera0/image/compressed
   model: double-sphere
+  pixel_sigma: 1.0
 - id: cam1
   topic: /camera1/image/compressed
   model: double-sphere
+  pixel_sigma: 1.0
 - id: cam2
   topic: /camera2/image/compressed
   model: double-sphere
+  pixel_sigma: 1.0
 - id: cam3
   topic: /camera3/image/compressed
   model: double-sphere
+  pixel_sigma: 1.0
 target:
   type: aprilgrid
   family: tag36h11
@@ -53,6 +57,5 @@ calibration:
   max_closure_translation_m: 0.05
 solver:
   max_iterations: 1000
-  pixel_sigma: 1.0
   huber_delta: 3.0
   point_rejection_px: 6.0

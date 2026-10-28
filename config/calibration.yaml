@@ -31,15 +31,20 @@ cameras:
 - id: cam0
   topic: /camera0/image/compressed
   model: double-sphere
+  # 每路角点各向同性标准差（px）；用于视觉残差白化。
+  pixel_sigma: 1.0
 - id: cam1
   topic: /camera1/image/compressed
   model: double-sphere
+  pixel_sigma: 1.0
 - id: cam2
   topic: /camera2/image/compressed
   model: double-sphere
+  pixel_sigma: 1.0
 - id: cam3
   topic: /camera3/image/compressed
   model: double-sphere
+  pixel_sigma: 1.0
 target:
   # 当前目标类型为 aprilgrid；几何必须与实物一致，尺寸误差会影响平移尺度。
   type: aprilgrid
@@ -102,11 +107,10 @@ calibration:
     # 当地重力模长，单位 m/s²；不是待估计的重力方向。
     gravity_magnitude_m_s2: 9.7883 #广州
     noise:
-      # 当前为工作配置值，不表示已测得设备噪声。应使用设备资料或独立测量。
-      # density 是噪声密度，不是单样本标准差；连续时间按实际采样间隔换算。
-      # bias_walk 为偏置随机游走参数；连续时间模型不含连续变化的 bias 轨迹。
-      gyro_density_rad_s_sqrt_hz: 0.001
-      accelerometer_density_m_s2_sqrt_hz: 0.001
+      # PSD 矩阵定义在标定后的物理坐标系；每样本 covariance = Q / dt_i。
+      # 当前为工作配置值，不表示已测得设备噪声。
+      gyro_covariance_rad2_s_hz: [[0.000001, 0.0, 0.0], [0.0, 0.000001, 0.0], [0.0, 0.0, 0.000001]]
+      accelerometer_covariance_m2_s4_hz: [[0.000001, 0.0, 0.0], [0.0, 0.000001, 0.0], [0.0, 0.0, 0.000001]]
       gyro_bias_walk_rad_s2_sqrt_hz: 0.00001
       accelerometer_bias_walk_m_s3_sqrt_hz: 0.00001
     integration:
@@ -136,9 +140,7 @@ calibration:
 solver:
   # LM 最大迭代预算；到达上限不等于数值收敛，须检查 solve.yaml 的诊断。
   max_iterations: 1000
-  # 像点噪声标准差（px），用于残差白化。
-  pixel_sigma: 1.0
-  # Huber 转折为白化残差单位；对应像素阈值 = pixel_sigma × huber_delta。
+  # Huber 转折为白化残差单位；每路像素阈值 = cameras[].pixel_sigma × huber_delta。
   huber_delta: 3.0
   # null：仅 Huber 加权，不做硬剔除，仅连续时间模式支持。
   # 正数（例如 6.0）：按像素阈值剔除观测；省略该键默认 6.0。

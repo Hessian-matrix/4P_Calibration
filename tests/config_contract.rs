@@ -29,8 +29,8 @@ fn inertial_source(method: &str, axis: &str) -> String {
   imu:
     gravity_magnitude_m_s2: 9.80665
     noise:
-      gyro_density_rad_s_sqrt_hz: 0.001
-      accelerometer_density_m_s2_sqrt_hz: 0.01
+      gyro_covariance_rad2_s_hz: [[0.000001, 0.0, 0.0], [0.0, 0.000001, 0.0], [0.0, 0.0, 0.000001]]
+      accelerometer_covariance_m2_s4_hz: [[0.0001, 0.0, 0.0], [0.0, 0.0001, 0.0], [0.0, 0.0, 0.0001]]
       gyro_bias_walk_rad_s2_sqrt_hz: 0.00001
       accelerometer_bias_walk_m_s3_sqrt_hz: 0.0001
     integration:
@@ -97,7 +97,7 @@ fn committed_ds_presets_match_their_intrinsic_priors() {
         let prior = load_result(prior_path).unwrap();
         assert_eq!(prior.cameras.len(), settings.cameras.len());
         for camera in &settings.cameras {
-            let parameters = prior.camera(&camera.id).unwrap().parameters;
+            let parameters = &prior.camera(&camera.id).unwrap().parameters;
             assert_eq!(parameters.model(), camera.model.core());
         }
     }
@@ -287,7 +287,7 @@ fn with_solver(source: &str, solver: &str) -> String {
 fn continuous_time_huber_only_policy_round_trips() {
     let source = with_solver(
         &inertial_source("continuous_time", &axis_block(false, IDENTITY, IDENTITY)),
-        "  max_iterations: 1000\n  pixel_sigma: 1.0\n  huber_delta: 4.0\n  point_rejection_px: null\n",
+        "  max_iterations: 1000\n  huber_delta: 4.0\n  point_rejection_px: null\n",
     );
     let (directory, path) = write_settings("huber-only.yaml", &source);
     let settings = RunSettings::load(&path).unwrap();
@@ -305,7 +305,7 @@ fn continuous_time_huber_only_policy_round_trips() {
 fn huber_only_policy_is_rejected_outside_continuous_time() {
     let source = with_solver(
         &inertial_source("preintegration", &axis_block(false, IDENTITY, IDENTITY)),
-        "  max_iterations: 1000\n  pixel_sigma: 1.0\n  huber_delta: 3.0\n  point_rejection_px: null\n",
+        "  max_iterations: 1000\n  huber_delta: 3.0\n  point_rejection_px: null\n",
     );
     let (_directory, path) = write_settings("null-rejection-preintegration.yaml", &source);
     assert!(RunSettings::load(&path).is_err());

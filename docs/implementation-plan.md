@@ -1,7 +1,7 @@
 # 4P 离线标定应用实施方案
 
 状态：离线标定已实现；TUI 使用配置工作台、运行监控与结果检查闭环。
-更新日期：2026-10-20
+更新日期：2026-10-27
 适用范围：单 Cam 内参、多 Cam 联合内外参、多 Cam—IMU 联合标定  
 算法依赖：`camera_corelib` 是唯一算法实现和 ROS bag 读取实现
 
@@ -15,7 +15,7 @@
 
 全应用统一使用 ROS 消息的 `header.stamp` 作为图像与 IMU 的传感器时间。`record_time_ns` 和 MCAP `publish_time_ns` 只用于诊断，不参与同步或标定，也不作为 header 缺失时的回退。
 
-开发阶段所有 `ccl_*` crate 统一使用相邻 `../camera_corelib` 工作树的源码级 path 依赖。接口稳定后一次性切换到同一个不可变 Git revision；禁止 path/Git 混用造成两份领域类型。
+所有 `ccl_*` crate 由同一完整 workspace `.rlib` bundle 提供，固定 Rust 1.98.1、目标平台、corelib commit 和 `--all-features` profile。GitHub 不访问内部 GitLab；内部 CI 构建后，将各平台压缩包一次性上传到 4P 的 GitHub Release。4P 通过 `tools/build.py` 校验并注入所需四个顶层 crate，不允许 path dependency 或源码 fallback。
 
 ## 2. 目标与边界
 
@@ -88,8 +88,8 @@ IMU 输入合同：
 - gyro 单位为 `rad/s`，在 IMU 坐标系表达。
 - linear acceleration 按比力 `m/s²` 解释。
 - header 时间严格递增，样本间隙不超过 `max_gap_s`。预积分要求 IMU 覆盖视觉时间与时差边界；连续时间调用 `supported_camera_interval`，在初始化前固定相机闭区间 `[first_imu − minimum_offset, last_imu − maximum_offset]`。外围 IMU 全保留，内部大 gap 整体拒绝；exact/seed 两组均裁剪，两个核心入口再次校验，试步不改变因子集合。
-- 噪声密度和 bias random walk 来自设备资料或独立测量，不使用示例值冒充事实。连续时间入口按实际 IMU 中位采样间隔把 density 换成 per-sample sigma。
-- 静态 IMU 模型遵循 Basalt 的 `physical = A * raw - bias`：gyro 完整 3×3（9 参数），accelerometer 正对角下三角（6 参数），加各 3 维常量 bias 共 21 参数。仅加速度计结构固定共同旋转规范，gyro 保留相对轴旋转；校正矩阵使用加性参数化。配置是初值，默认单位矩阵且不精化；预积分拒绝非单位矩阵或轴精化请求。噪声 sigma 定义在校正物理系内，仍为各向同性，不隐式变换 raw 协方差。
+- gyro/accelerometer 白噪声使用校正物理系内的 `3×3` PSD 矩阵，来自设备资料或独立测量，不使用示例值冒充事实。连续时间对每个样本按相邻时间戳计算有效 `dt_i` 并使用 `covariance_i = Q / dt_i`；预积分暂只接受各向同性对角 PSD。
+- 静态 IMU 模型遵循 Basalt 的 `physical = A * raw - bias`：gyro 完整 3×3（9 参数），accelerometer 正对角下三角（6 参数），加各 3 维常量 bias 共 21 参数。仅加速度计结构固定共同旋转规范，gyro 保留相对轴旋转；校正矩阵使用加性参数化。配置是初值，默认单位矩阵且不精化；预积分拒绝非单位矩阵或轴精化请求。PSD 定义在校正物理系内，不隐式变换 raw covariance。
 
 连续时间缺省流程：
 

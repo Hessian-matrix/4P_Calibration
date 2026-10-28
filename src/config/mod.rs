@@ -73,6 +73,8 @@ pub struct CameraConfig {
     pub id: String,
     pub topic: String,
     pub model: CameraModelConfig,
+    /// Isotropic corner standard deviation for this camera, in pixels.
+    pub pixel_sigma: f64,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -329,18 +331,14 @@ impl ImuAxisCalibrationConfig {
     }
 }
 
-/// Sensor noise densities of the calibrated physical measurements, i.e. after the
-/// axis matrix and before bias removal.
-///
-/// The continuous-time method keeps caller-supplied scalar isotropic per-sample
-/// standard deviations, derived from these densities, and weights each calibrated
-/// physical-frame sample directly; it deliberately does not transform a raw-frame
-/// covariance through the axis matrix.
+/// Continuous white-noise PSD matrices of calibrated physical measurements.
+/// Continuous-time factors use `covariance_i = Q / dt_i`; preintegration currently
+/// requires each matrix to be isotropic diagonal and uses the square root diagonal.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImuNoiseConfig {
-    pub gyro_density_rad_s_sqrt_hz: f64,
-    pub accelerometer_density_m_s2_sqrt_hz: f64,
+    pub gyro_covariance_rad2_s_hz: [[f64; 3]; 3],
+    pub accelerometer_covariance_m2_s4_hz: [[f64; 3]; 3],
     pub gyro_bias_walk_rad_s2_sqrt_hz: f64,
     pub accelerometer_bias_walk_m_s3_sqrt_hz: f64,
 }
@@ -363,9 +361,8 @@ pub enum IntegrationMethod {
 #[serde(deny_unknown_fields)]
 pub struct SolverConfig {
     pub max_iterations: usize,
-    pub pixel_sigma: f64,
-    /// Huber transition in whitened residual units; the pixel threshold is
-    /// `pixel_sigma * huber_delta`.
+    /// Huber transition in whitened residual units. Each camera's pixel threshold is
+    /// `cameras[].pixel_sigma * huber_delta`.
     pub huber_delta: f64,
     /// Hard per-observation rejection threshold in pixels.
     ///
@@ -384,7 +381,6 @@ impl Default for SolverConfig {
     fn default() -> Self {
         Self {
             max_iterations: 1_000,
-            pixel_sigma: 1.0,
             huber_delta: 3.0,
             point_rejection_px: default_point_rejection_px(),
         }
@@ -421,6 +417,11 @@ impl RunSettings {
             ensure!(
                 ids.insert(camera.id.as_str()),
                 "duplicate camera id {}",
+                camera.id
+            );
+            ensure!(
+                camera.pixel_sigma.is_finite() && camera.pixel_sigma > 0.0,
+                "camera {} pixel_sigma must be positive and finite",
                 camera.id
             );
             ensure!(
@@ -509,15 +510,10 @@ impl RunSettings {
             (1..=1_000).contains(&solver.max_iterations),
             "solver max_iterations must be in 1..=1000"
         );
-        for (name, value) in [
-            ("pixel_sigma", solver.pixel_sigma),
-            ("huber_delta", solver.huber_delta),
-        ] {
-            ensure!(
-                value.is_finite() && value > 0.0,
-                "{name} must be positive and finite"
-            );
-        }
+        ensure!(
+            solver.huber_delta.is_finite() && solver.huber_delta > 0.0,
+            "huber_delta must be positive and finite"
+        );
         match solver.point_rejection_px {
             Some(value) => ensure!(
                 value.is_finite() && value > 0.0,
@@ -655,8 +651,6 @@ impl RunSettings {
                 );
                 for value in [
                     imu.gravity_magnitude_m_s2,
-                    imu.noise.gyro_density_rad_s_sqrt_hz,
-                    imu.noise.accelerometer_density_m_s2_sqrt_hz,
                     imu.noise.gyro_bias_walk_rad_s2_sqrt_hz,
                     imu.noise.accelerometer_bias_walk_m_s3_sqrt_hz,
                     imu.integration.max_gap_s,
@@ -666,6 +660,14 @@ impl RunSettings {
                         "IMU parameters must be positive and finite"
                     );
                 }
+                Self::validate_covariance(
+                    imu.noise.gyro_covariance_rad2_s_hz,
+                    "imu.noise.gyro_covariance_rad2_s_hz",
+                )?;
+                Self::validate_covariance(
+                    imu.noise.accelerometer_covariance_m2_s4_hz,
+                    "imu.noise.accelerometer_covariance_m2_s4_hz",
+                )?;
                 ensure!(
                     imu.integration.max_samples >= 2,
                     "IMU max_samples must be at least 2"
@@ -674,6 +676,31 @@ impl RunSettings {
         }
         Ok(())
     }
+
+fn validate_covariance(matrix: [[f64; 3]; 3], name: &str) -> Result<()> {
+    ensure!(
+        matrix.iter().flatten().all(|value| value.is_finite()),
+        "{name} must be finite"
+    );
+    ensure!(
+        (0..3).all(|row| (0..3).all(|column| {
+            (matrix[row][column] - matrix[column][row]).abs() <= 1.0e-12
+        })),
+        "{name} must be symmetric"
+    );
+    let leading_two = matrix[0][0] * matrix[1][1] - matrix[0][1] * matrix[1][0];
+    let determinant = matrix[0][0]
+        * (matrix[1][1] * matrix[2][2] - matrix[1][2] * matrix[2][1])
+        - matrix[0][1]
+            * (matrix[1][0] * matrix[2][2] - matrix[1][2] * matrix[2][0])
+        + matrix[0][2]
+            * (matrix[1][0] * matrix[2][1] - matrix[1][1] * matrix[2][0]);
+    ensure!(
+        matrix[0][0] > 0.0 && leading_two > 0.0 && determinant > 0.0,
+        "{name} must be positive definite"
+    );
+    Ok(())
+}
 
     #[must_use]
     pub fn mode_name(&self) -> &'static str {

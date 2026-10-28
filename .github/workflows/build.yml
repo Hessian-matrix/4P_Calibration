@@ -1,0 +1,63 @@
+name: build
+
+on:
+  pull_request:
+  push:
+    branches: [feat-4p-calib-rust, main]
+    tags: ["v*"]
+
+env:
+  CORELIB_VERSION: 0.6.0
+  CORELIB_RELEASE_TAG: corelib-0.6.0
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+          targets: ${{ matrix.target }}
+      - name: Download corelib bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          name="camera_corelib-${CORELIB_VERSION}-${{ matrix.target }}-rlibs.tar.gz"
+          gh release download "${CORELIB_RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --pattern "${name}" --dir corelib-dist
+          echo "CORELIB_ARCHIVE=${PWD}/corelib-dist/${name}" >> "${GITHUB_ENV}"
+      - name: Test
+        shell: bash
+        run: python3 tools/build.py --bundle "${CORELIB_ARCHIVE}" --test
+      - name: Build release
+        shell: bash
+        run: python3 tools/build.py --bundle "${CORELIB_ARCHIVE}" --release
+      - name: Stage application
+        shell: bash
+        run: |
+          mkdir -p dist
+          if [[ "${{ runner.os }}" == Windows ]]; then exe=.exe; else exe=; fi
+          cp "target/release/four-p-calibration${exe}" "dist/four-p-calibration-${{ matrix.target }}${exe}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: four-p-calibration-${{ matrix.target }}
+          path: dist/*
+      - name: Upload tagged release asset
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: gh release upload "${GITHUB_REF_NAME}" dist/* --clobber

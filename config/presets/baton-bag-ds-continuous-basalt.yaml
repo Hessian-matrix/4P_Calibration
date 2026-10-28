@@ -9,9 +9,11 @@ cameras:
 - id: cam0
   topic: /baton_mini/image_left
   model: double-sphere
+  pixel_sigma: 1.0
 - id: cam1
   topic: /baton_mini/image_right
   model: double-sphere
+  pixel_sigma: 1.0
 target:
   type: aprilgrid
   family: tag36h11
@@ -52,14 +54,10 @@ calibration:
   imu:
     gravity_magnitude_m_s2: 9.80665
     noise:
-      # The gyro/accelerometer densities below are Basalt EuRoC reference
-      # values, kept only so both pipelines see the same weighting in a
-      # comparison run. They are NOT this device's calibrated noise; replace
-      # them with datasheet or measured values before treating any result as a
-      # device calibration. Bias walks keep the values already used by the
-      # existing baton preset.
-      gyro_density_rad_s_sqrt_hz: 0.000282
-      accelerometer_density_m_s2_sqrt_hz: 0.016
+      # Physical-frame PSD matrices corresponding to the Basalt EuRoC reference
+      # densities. They are NOT this device's calibrated noise.
+      gyro_covariance_rad2_s_hz: [[0.000000079524, 0.0, 0.0], [0.0, 0.000000079524, 0.0], [0.0, 0.0, 0.000000079524]]
+      accelerometer_covariance_m2_s4_hz: [[0.000256, 0.0, 0.0], [0.0, 0.000256, 0.0], [0.0, 0.0, 0.000256]]
       gyro_bias_walk_rad_s2_sqrt_hz: 0.00001
       accelerometer_bias_walk_m_s3_sqrt_hz: 0.0001
     integration:
@@ -73,8 +71,7 @@ calibration:
       knot_interval_s: 0.01
 solver:
   max_iterations: 1000
-  pixel_sigma: 1.0
-  # Whitened Huber transition: pixel_sigma * huber_delta = 4 px.
+  # Whitened Huber transition; each camera uses pixel_sigma * huber_delta = 4 px.
   huber_delta: 4.0
   # Basalt-style Huber-only weighting: no hard 6 px pruning.
   point_rejection_px: null

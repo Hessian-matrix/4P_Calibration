@@ -4,15 +4,18 @@
 
 仓库只保留 ROS bag 输入适配、结果导出与薄 Ratatui 壳。AprilTag 检测、相机模型、投影、位姿、内外参、相机—IMU 和可观测性全部调用 `camera_corelib`；本仓库不维护第二套核心算法。
 
-开发阶段的 `ccl_image`、`ccl_calib`、`ccl_geometry` 和 `ccl_rosbag` 通过 `../camera_corelib` 本地源码引用。四个 crate 始终来自同一个源码树，避免领域类型重复。
+`camera_corelib` 以完整 workspace 的预编译 `.rlib` bundle 交付；bundle 固定 Rust 1.98.1、目标平台、corelib commit 和 `--all-features` profile。4P 只链接 `ccl_image`、`ccl_calib`、`ccl_geometry` 和 `ccl_rosbag`，但发布压缩包保留全部 workspace crate。
 
-## 运行
+## 构建与运行
 
-直接启动交互式 TUI，默认读取当前工作目录的 `config/calibration.yaml`；文件不存在时使用代码默认配置，文件存在但无法读取或校验失败时明确报错：
+先从对应 GitHub Release 下载当前平台的 `camera_corelib-<version>-<target>-rlibs.tar.gz`，再通过唯一构建入口校验并构建：
 
 ```sh
-cargo run
+python3 tools/build.py --bundle /path/to/camera_corelib-0.6.0-<target>-rlibs.tar.gz --release
+target/release/four-p-calibration
 ```
+
+`tools/build.py` 固定接受 corelib `0.6.0`、提交 `d279273e2ae6bd7a21738d108837ded12fc6c64a`，并拒绝 rustc release/commit、host/target、feature profile 或必需 `.rlib` 不匹配的包；不回退到相邻源码。运行记录写入 bundle 版本、commit、target、rustc 和压缩包 SHA-256。直接 `cargo build/run/test` 不构成受支持入口。
 
 流程：数据源扫描 → 传感器与任务模式 → 标定板 → 求解设置 → 启动检查 → 运行监控 → 结果检查。勾选或取消相机/IMU 话题时自动推断模式：未选 IMU 时，1 路相机为单 Cam，2 路及以上为多 Cam；选中 IMU 时为多 Cam+IMU。零相机或相机–IMU 模式不足两路相机时仍由预检阻止启动。可手动调整模式，下一次话题选择变更会重新推断。配置各部分可返回修改，运行使用不可变快照；结果页可修改配置或使用相同配置创建独立的新运行。
 
@@ -36,18 +39,18 @@ TUI 交互：
 - 结束后保留冻结的仪表盘，`r` 或按钮进入结果页，结果页 `Esc` 返回仪表盘。结果参数和诊断按表格组织；原始 YAML 保留在文件页。`F6` 打开目录，`F7` 打开外参图，`F9` 修改配置，`F10` 相同配置重跑。
 - `F8/Ctrl-C` 经确认取消，等待 worker 实际退出；`Ctrl-Q` 确认退出，`Esc` 不取消任务。
 
-无 TUI 批处理使用同一份 `RunSettings`、输入 adapter 和 runner：
+无 TUI 批处理先按上述方式构建，再使用同一份 `RunSettings`、输入 adapter 和 runner：
 
 ```sh
-cargo run -- --no-tui --config config/calibration.yaml
+target/release/four-p-calibration --no-tui --config config/calibration.yaml
 ```
 
 当前 `config/calibration.yaml` 对应 `calib_ext.bag` 的连续时间相机—IMU 工作基线：gyro/accel 轴矩阵固定为单位阵（`axis_calibration.refine: false`），时差仍在 ±0.1 s 内估计，轨迹、外参、常量 bias 和重力方向继续联合优化。此设置不表示已验证硬件轴误差为零；历史运行快照不会被修改。无参数启动 TUI 自动读取此文件；显式 `--config` 优先，指定文件加载失败时不会回退。
 
-也可用配置预填 TUI：
+也可使用配置预填已构建的 TUI：
 
 ```sh
-cargo run -- --config config/calibration.yaml
+target/release/four-p-calibration --config config/calibration.yaml
 ```
 
 已固化两套 Double Sphere 数据预设；这些复现实验使用显式内参初值，初值与运行配置分开保存，配置中的相对路径从仓库根目录解析：
@@ -58,10 +61,10 @@ cargo run -- --config config/calibration.yaml
 
 ```sh
 # 1.bag：四相机纯视觉，固定 DS 内参后求 rig 外参
-cargo run --release -- --no-tui --config config/presets/1-bag-ds.yaml
+target/release/four-p-calibration --no-tui --config config/presets/1-bag-ds.yaml
 
 # baton_bag：双相机—IMU；将 method 改为 continuous_time 可启用 B 样条联合优化
-cargo run --release -- --no-tui --config config/presets/baton-bag-ds.yaml
+target/release/four-p-calibration --no-tui --config config/presets/baton-bag-ds.yaml
 ```
 
 `1.bag` 的平面板序列无法独立约束四相机 DS 内参联合精化，因此该预设显式设置 `refine_intrinsics: false`。求解器不再按秩、条件数或 LM 停止原因设置发布阈值；`solve.yaml` 原样记录诊断，`result/calibration.yaml` 标为 `acceptance: pending_human_review`。对应初值位于 `config/intrinsics/1-bag-ds.yaml`；`baton_bag` 初值位于 `config/intrinsics/baton-bag-ds.yaml`。
@@ -89,9 +92,11 @@ calibration:
 
 连续时间信息矩阵的带状 Schur 消元会精确移除局部正规矩阵及 global 交叉块中均为全零的坐标，不添加阻尼或先验。非零耦合的奇异局部块仍不能据此消除；真正的全局秩亏仍按原规则报告。此处理仅影响信息诊断，不改变 LM 更新或标定残差。
 
-噪声配置仍为校正物理坐标系内的各向同性密度，按实际中位采样间隔换算每样本 sigma；不将它解释成随 A 变换的 raw 协方差。此处对齐的是 Basalt 静态传感器模型，不包含温漂、g-sensitivity 或连续时间 bias 随机游走，也不表示复刻其优化器。
+视觉噪声现在由每个 `cameras[].pixel_sigma` 独立配置。连续时间 IMU 噪声使用校正物理坐标系内的 gyro/accelerometer `3×3` 白噪声 PSD；每个样本按自身有效支持间隔计算 `covariance_i = Q / dt_i`，不再使用全局中位采样间隔，也不将 PSD 解释成随 A 变换的 raw covariance。预积分仍只接受各向同性对角 PSD，并取其对角平方根作为既有密度输入。
 
-`config/presets/baton-bag-ds-continuous-basalt.yaml` 显式采用 0.01 s 四次样条、Huber-only 像点策略和参考噪声密度；这些数值不代表设备噪声实测。`solver.point_rejection_px: null` 禁止硬剔除，正数则启用阈值剔除；二者均保留 Huber 权重。KB4 固定零 skew，仅优化 `fx/fy/cx/cy/k1..k4`，与 OpenCV fisheye `CALIB_FIX_SKEW` 的参数合同一致；含 `alpha` 字段的旧 KB4 文件会被拒绝。旧值为零时可显式移除该字段，非零值必须重新拟合，不能无损丢弃。
+`solve.yaml` 同时导出逐相机 visual whitened RMS、连续时间 gyro/accelerometer whitened RMS，以及每个全局参数在优化坐标中的局部曲率边缘标准差。RMS 的平方可作工作 variance-scale 诊断，但当前不会自动重加权或改变 acceptance；参数标准差也未做 robust sandwich/REML 校准。
+
+`config/presets/baton-bag-ds-continuous-basalt.yaml` 显式采用 0.01 s 四次样条、Huber-only 像点策略和参考 PSD；这些数值不代表设备噪声实测。`solver.point_rejection_px: null` 禁止硬剔除，正数则启用阈值剔除；二者均保留 Huber 权重。KB4 固定零 skew，仅优化 `fx/fy/cx/cy/k1..k4`，与 OpenCV fisheye `CALIB_FIX_SKEW` 的参数合同一致；含 `alpha` 字段的旧 KB4 文件会被拒绝。旧值为零时可显式移除该字段，非零值必须重新标定，不能静默丢弃。
 
 **迁移：**旧 `gyro_matrix` / `accelerometer_matrix` 配置键及旧 `raw_from_physical` 结果键不再接受。含 IMU 的 schema 1–3 结果禁止作为新版结果加载；schema 4–5 的 IMU 合同相同。纯相机旧 schema 仍可读取，但 KB4 参数必须符合无 `alpha` 的新模型合同。一般非单位旧矩阵不能只重命名：同一轴系下先有 `A=M⁻¹`、`b_cal=A b_raw`，还须将加速度计改为下三角规范，并一致旋转 gyro、bias、外参及轨迹。建议重新标定；历史 run 保持原样。
 

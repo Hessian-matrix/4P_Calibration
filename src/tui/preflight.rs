@@ -531,16 +531,17 @@ fn check_imu(draft: &Draft, settings: &RunSettings, checks: &mut Vec<PreflightCh
     checks.push(ok(
         "IMU 参数",
         format!(
-            "g={} m/s²；gyro σ={}；accel σ={}；max_gap={} s；max_samples={}；knot={} s",
+            "g={} m/s²；gyro PSD diag={:?}；accel PSD diag={:?}；max_gap={} s；max_samples={}；knot={} s",
             imu.gravity_magnitude_m_s2,
-            imu.noise.gyro_density_rad_s_sqrt_hz,
-            imu.noise.accelerometer_density_m_s2_sqrt_hz,
+            [imu.noise.gyro_covariance_rad2_s_hz[0][0], imu.noise.gyro_covariance_rad2_s_hz[1][1], imu.noise.gyro_covariance_rad2_s_hz[2][2]],
+            [imu.noise.accelerometer_covariance_m2_s4_hz[0][0], imu.noise.accelerometer_covariance_m2_s4_hz[1][1], imu.noise.accelerometer_covariance_m2_s4_hz[2][2]],
             imu.integration.max_gap_s,
             imu.integration.max_samples,
             imu.continuous_time.knot_interval_s
         ),
     ));
-    let huber_px = settings.solver.huber_delta * settings.solver.pixel_sigma;
+    let huber_px = settings.solver.huber_delta
+        * settings.cameras.first().map_or(1.0, |camera| camera.pixel_sigma);
     checks.push(ok(
         "像素鲁棒策略",
         match settings.solver.point_rejection_px {

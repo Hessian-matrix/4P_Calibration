@@ -27,9 +27,35 @@ struct RunMetadata {
     status: RunStatus,
     mode: Option<String>,
     application_version: String,
-    corelib_source: String,
+    corelib: CorelibProvenance,
     error_category: Option<String>,
     stage_duration_ms: BTreeMap<String, u64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CorelibProvenance {
+    distribution: &'static str,
+    workspace_version: &'static str,
+    git_commit: &'static str,
+    target: &'static str,
+    rustc_release: &'static str,
+    artifact_sha256: &'static str,
+    profile: &'static str,
+}
+
+impl CorelibProvenance {
+    const fn bundled() -> Self {
+        Self {
+            distribution: "rlib_bundle",
+            workspace_version: env!("FOUR_P_CORELIB_VERSION"),
+            git_commit: env!("FOUR_P_CORELIB_GIT_COMMIT"),
+            target: env!("FOUR_P_CORELIB_TARGET"),
+            rustc_release: env!("FOUR_P_CORELIB_RUSTC_RELEASE"),
+            artifact_sha256: env!("FOUR_P_CORELIB_ARTIFACT_SHA256"),
+            profile: env!("FOUR_P_CORELIB_WORKSPACE_FEATURES"),
+        }
+    }
 }
 
 struct RunDirectory {
@@ -81,7 +107,7 @@ impl RunContext {
                 status: RunStatus::InProgress,
                 mode: None,
                 application_version: env!("CARGO_PKG_VERSION").to_owned(),
-                corelib_source: "path:../camera_corelib".to_owned(),
+                corelib: CorelibProvenance::bundled(),
                 error_category: None,
                 stage_duration_ms: BTreeMap::new(),
             })),

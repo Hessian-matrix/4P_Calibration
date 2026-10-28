@@ -53,6 +53,12 @@ pub struct CameraSolveSummary {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct ParameterStandardDeviation {
+    pub parameter: String,
+    pub standard_deviation: f64,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct SolveSummary {
     pub converged: bool,
     pub termination: String,
@@ -68,7 +74,13 @@ pub struct SolveSummary {
     pub condition_number: f64,
     pub covariance_is_pseudoinverse: bool,
     pub camera_errors: Vec<CameraSolveSummary>,
+    /// Empirical RMS in nominal whitened units; diagnostic variance scales are its square.
+    pub visual_whitened_rms: Vec<f64>,
+    pub gyro_whitened_rms: Option<f64>,
+    pub accelerometer_whitened_rms: Option<f64>,
     pub inertial_whitened_rms: Option<f64>,
+    /// Local-curvature marginal standard deviations in each optimization coordinate's unit.
+    pub parameter_standard_deviations: Vec<ParameterStandardDeviation>,
 }
 #[derive(Clone, Debug)]
 pub enum Event {
@@ -285,7 +297,7 @@ fn solve_single(
         )
     })?;
     log_rig_diagnostics(run, &result)?;
-    let summary = rig_solve_summary(&result);
+    let summary = rig_solve_summary(&result, config);
     let trajectory = Trajectory::visual(
         source_index,
         camera_id,
@@ -362,7 +374,7 @@ fn solve_multi(
         )
     })?;
     log_rig_diagnostics(run, &result)?;
-    let summary = rig_solve_summary(&result);
+    let summary = rig_solve_summary(&result, config);
     let trajectory = Trajectory::visual(
         reference_index,
         reference_camera,
@@ -504,10 +516,14 @@ fn solve_inertial(
         VisualInertialSolverConfig {
             solver: joint_solver(config),
             imu_noise: ImuNoise {
-                gyro_density_rad_s_sqrt_hz: imu_config.noise.gyro_density_rad_s_sqrt_hz,
-                accelerometer_density_m_s2_sqrt_hz: imu_config
-                    .noise
-                    .accelerometer_density_m_s2_sqrt_hz,
+                gyro_density_rad_s_sqrt_hz: isotropic_density(
+                    imu_config.noise.gyro_covariance_rad2_s_hz,
+                    "gyro",
+                )?,
+                accelerometer_density_m_s2_sqrt_hz: isotropic_density(
+                    imu_config.noise.accelerometer_covariance_m2_s4_hz,
+                    "accelerometer",
+                )?,
                 gyro_bias_walk_rad_s2_sqrt_hz: imu_config.noise.gyro_bias_walk_rad_s2_sqrt_hz,
                 accelerometer_bias_walk_m_s3_sqrt_hz: imu_config
                     .noise
@@ -525,7 +541,7 @@ fn solve_inertial(
     .context("preintegration initializer failed")?;
     run.record_stage_duration("solve_preintegration", elapsed_millis(stage_started))?;
     log_inertial_diagnostics(run, &visual)?;
-    let summary = inertial_solve_summary(&visual);
+    let summary = inertial_solve_summary(&visual, config);
     let trajectory =
         Trajectory::inertial(&visual.states, &seed_views, visual.time_offset_s, origin)?;
     trajectory.write(run)?;
@@ -675,7 +691,7 @@ fn solve_continuous_inertial(
             initial_imu_calibration,
             refine_intrinsics: false,
         },
-        solver_config,
+        solver_config.clone(),
         control,
     )
     .context("continuous-time baseline solve failed")?;
@@ -719,7 +735,7 @@ fn solve_continuous_inertial(
         baseline
     };
     log_continuous_time_diagnostics(run, &result)?;
-    let summary = continuous_time_solve_summary(&result);
+    let summary = continuous_time_solve_summary(&result, config);
     let trajectory = Trajectory::continuous(
         &result.trajectory,
         exact_views,
@@ -735,15 +751,14 @@ fn solve_continuous_inertial(
 fn continuous_solver_config(
     config: &RunSettings,
     imu_config: &crate::config::ImuConfig,
-    imu: &ImuSequence<'_>,
+    _imu: &ImuSequence<'_>,
 ) -> Result<ContinuousTimeSolverConfig> {
-    let sample_interval_s = median_sample_interval_s(imu)?;
-    // Physical-frame isotropic weights: density / sqrt(dt), no raw covariance transform.
     Ok(ContinuousTimeSolverConfig {
         solver: joint_solver(config),
-        gyro_sigma_rad_s: imu_config.noise.gyro_density_rad_s_sqrt_hz / sample_interval_s.sqrt(),
-        accelerometer_sigma_m_s2: imu_config.noise.accelerometer_density_m_s2_sqrt_hz
-            / sample_interval_s.sqrt(),
+        gyro_noise_covariance_rad2_s_hz: imu_config.noise.gyro_covariance_rad2_s_hz,
+        accelerometer_noise_covariance_m2_s4_hz: imu_config
+            .noise
+            .accelerometer_covariance_m2_s4_hz,
         gravity_magnitude_m_s2: imu_config.gravity_magnitude_m_s2,
         max_imu_gap_s: imu_config.integration.max_gap_s,
         max_imu_samples: imu_config.integration.max_samples,
@@ -996,7 +1011,7 @@ fn initial_cameras(
                 "prior camera model mismatch for {}",
                 camera.id
             );
-            Ok(previous.parameters)
+            previous.parameters.to_core()
         })
         .collect()
 }
@@ -1054,34 +1069,26 @@ fn core_time_offset(config: TimeOffsetConfig, solved_initial_s: Option<f64>) -> 
     }
 }
 
-fn median_sample_interval_s(imu: &ImuSequence<'_>) -> Result<f64> {
-    let mut intervals = imu
-        .samples()
-        .windows(2)
-        .map(|pair| pair[1].time.seconds() - pair[0].time.seconds())
-        .collect::<Vec<_>>();
+fn isotropic_density(covariance: [[f64; 3]; 3], sensor: &str) -> Result<f64> {
+    let variance = covariance[0][0];
     ensure!(
-        !intervals.is_empty(),
-        "at least two IMU samples are required"
+        covariance[0][1] == 0.0
+            && covariance[0][2] == 0.0
+            && covariance[1][0] == 0.0
+            && covariance[1][2] == 0.0
+            && covariance[2][0] == 0.0
+            && covariance[2][1] == 0.0
+            && covariance[1][1] == variance
+            && covariance[2][2] == variance,
+        "preintegration requires isotropic diagonal {sensor} noise covariance"
     );
-    intervals.sort_by(f64::total_cmp);
-    let middle = intervals.len() / 2;
-    let median = if intervals.len().is_multiple_of(2) {
-        f64::midpoint(intervals[middle - 1], intervals[middle])
-    } else {
-        intervals[middle]
-    };
-    ensure!(
-        median.is_finite() && median > 0.0,
-        "IMU sample interval must be positive and finite"
-    );
-    Ok(median)
+    Ok(variance.sqrt())
 }
 
 fn joint_solver(config: &RunSettings) -> JointSolverConfig {
     JointSolverConfig {
         max_iterations: config.solver.max_iterations,
-        pixel_sigma: config.solver.pixel_sigma,
+        pixel_sigmas: config.cameras.iter().map(|camera| camera.pixel_sigma).collect(),
         huber_delta: config.solver.huber_delta,
         point_rejection_px: config.solver.point_rejection_px,
     }
@@ -1096,7 +1103,7 @@ fn camera_output(
         id: id.to_owned(),
         image_width: size.width,
         image_height: size.height,
-        parameters,
+        parameters: crate::export::CameraParametersOutput::from_core(parameters),
     }
 }
 
@@ -1119,6 +1126,9 @@ fn solve_summary(
     convergence: &JointConvergence,
     information: &CalibrationInformation,
     camera_errors: &[ccl_calib::camera::rig::CameraResidualSummary],
+    pixel_sigmas: &[f64],
+    gyro_whitened_rms: Option<f64>,
+    accelerometer_whitened_rms: Option<f64>,
     inertial_whitened_rms: Option<f64>,
 ) -> SolveSummary {
     SolveSummary {
@@ -1136,58 +1146,68 @@ fn solve_summary(
         condition_number: information.condition_number,
         covariance_is_pseudoinverse: information.covariance_is_pseudoinverse,
         camera_errors: camera_solve_summaries(camera_errors),
+        visual_whitened_rms: camera_errors
+            .iter()
+            .map(|error| error.rms_px / pixel_sigmas[error.camera_index])
+            .collect(),
+        gyro_whitened_rms,
+        accelerometer_whitened_rms,
         inertial_whitened_rms,
+        parameter_standard_deviations: information
+            .parameter_names
+            .iter()
+            .enumerate()
+            .map(|(index, parameter)| ParameterStandardDeviation {
+                parameter: parameter.clone(),
+                standard_deviation: information.covariance[(index, index)].max(0.0).sqrt(),
+            })
+            .collect(),
     }
 }
 
-fn rig_solve_summary(result: &CameraRigCalibrationResult) -> SolveSummary {
+fn rig_solve_summary(result: &CameraRigCalibrationResult, config: &RunSettings) -> SolveSummary {
     solve_summary(
         &result.convergence,
         &result.information,
         &result.camera_errors,
+        &config.cameras.iter().map(|camera| camera.pixel_sigma).collect::<Vec<_>>(),
+        None,
+        None,
         None,
     )
 }
 
-fn inertial_solve_summary(result: &VisualInertialCalibrationResult) -> SolveSummary {
+fn inertial_solve_summary(result: &VisualInertialCalibrationResult, config: &RunSettings) -> SolveSummary {
     let inertial_whitened_rms = (!result.inertial_residuals.is_empty()).then(|| {
-        let squared = result
-            .inertial_residuals
-            .iter()
-            .map(|residual| residual.whitened_rms.powi(2))
-            .sum::<f64>();
-        let count = f64::from(
-            u32::try_from(result.inertial_residuals.len())
-                .expect("solver view budget keeps interval count within u32"),
-        );
-        (squared / count).sqrt()
+        let squared = result.inertial_residuals.iter().map(|residual| residual.whitened_rms.powi(2)).sum::<f64>();
+        (squared / result.inertial_residuals.len() as f64).sqrt()
     });
     solve_summary(
         &result.convergence,
         &result.information,
         &result.camera_errors,
+        &config.cameras.iter().map(|camera| camera.pixel_sigma).collect::<Vec<_>>(),
+        None,
+        None,
         inertial_whitened_rms,
     )
 }
 
-fn continuous_time_solve_summary(result: &ContinuousTimeCalibrationResult) -> SolveSummary {
-    let inertial_whitened_rms = (!result.imu_residuals.is_empty()).then(|| {
-        let squared = result
-            .imu_residuals
-            .iter()
-            .map(|residual| residual.whitened_rms.powi(2))
-            .sum::<f64>();
-        let count = f64::from(
-            u32::try_from(result.imu_residuals.len())
-                .expect("solver IMU budget keeps sample count within u32"),
-        );
-        (squared / count).sqrt()
+fn continuous_time_solve_summary(result: &ContinuousTimeCalibrationResult, config: &RunSettings) -> SolveSummary {
+    let rms = |values: &[f64]| (!values.is_empty()).then(|| {
+        (values.iter().map(|value| value * value).sum::<f64>() / values.len() as f64).sqrt()
     });
+    let gyro = result.imu_residuals.iter().map(|residual| residual.gyro_whitened_rms).collect::<Vec<_>>();
+    let accel = result.imu_residuals.iter().map(|residual| residual.accelerometer_whitened_rms).collect::<Vec<_>>();
+    let combined = result.imu_residuals.iter().map(|residual| residual.whitened_rms).collect::<Vec<_>>();
     solve_summary(
         &result.convergence,
         &result.information,
         &result.camera_errors,
-        inertial_whitened_rms,
+        &config.cameras.iter().map(|camera| camera.pixel_sigma).collect::<Vec<_>>(),
+        rms(&gyro),
+        rms(&accel),
+        rms(&combined),
     )
 }
 
