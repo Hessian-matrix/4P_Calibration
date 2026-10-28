@@ -21,7 +21,7 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
           - os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -34,6 +34,18 @@ jobs:
         with:
           toolchain: 1.98.1
           targets: ${{ matrix.target }}
+      - name: Prepare target runtime
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user
+          echo 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc' >> "${GITHUB_ENV}"
+          echo 'CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER=qemu-aarch64 -L /usr/aarch64-linux-gnu' >> "${GITHUB_ENV}"
+      - name: Build Windows rustc wrapper
+        if: runner.os == 'Windows'
+        shell: bash
+        run: rustc tools/corelib-rustc-wrapper.rs -o tools/corelib-rustc-wrapper.exe
       - name: Download corelib bundle
         env:
           GH_TOKEN: ${{ github.token }}
@@ -44,16 +56,16 @@ jobs:
           echo "CORELIB_ARCHIVE=${PWD}/corelib-dist/${name}" >> "${GITHUB_ENV}"
       - name: Test
         shell: bash
-        run: python3 tools/build.py --bundle "${CORELIB_ARCHIVE}" --test
+        run: python3 tools/build.py --bundle "${CORELIB_ARCHIVE}" --target "${{ matrix.target }}" --test
       - name: Build release
         shell: bash
-        run: python3 tools/build.py --bundle "${CORELIB_ARCHIVE}" --release
+        run: python3 tools/build.py --bundle "${CORELIB_ARCHIVE}" --target "${{ matrix.target }}" --release
       - name: Stage application
         shell: bash
         run: |
           mkdir -p dist
           if [[ "${{ runner.os }}" == Windows ]]; then exe=.exe; else exe=; fi
-          cp "target/release/four-p-calibration${exe}" "dist/four-p-calibration-${{ matrix.target }}${exe}"
+          cp "target/${{ matrix.target }}/release/four-p-calibration${exe}" "dist/four-p-calibration-${{ matrix.target }}${exe}"
       - uses: actions/upload-artifact@v4
         with:
           name: four-p-calibration-${{ matrix.target }}

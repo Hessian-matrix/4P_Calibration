@@ -64,7 +64,7 @@ def resolve_bundle(path: Path) -> tuple[Path, Path | None]:
     return (work / roots.pop()).resolve(), work
 
 
-def validate_bundle(bundle: Path) -> dict[str, str]:
+def validate_bundle(bundle: Path, target: str) -> dict[str, str]:
     manifest = parse_manifest(bundle / "MANIFEST.txt")
     for key, expected in REQUIRED_MANIFEST.items():
         if manifest.get(key) != expected:
@@ -73,9 +73,8 @@ def validate_bundle(bundle: Path) -> dict[str, str]:
     for key in ("release", "commit_hash", "commit_date", "llvm_version"):
         if manifest.get(f"rustc_{key}") != current.get(key):
             raise SystemExit(f"rustc {key} does not match bundle manifest")
-    target = current["host"]
     if manifest.get("target") != target:
-        raise SystemExit(f"bundle target {manifest.get('target')!r} does not match host {target!r}")
+        raise SystemExit(f"bundle target {manifest.get('target')!r} does not match requested target {target!r}")
     for crate in CORELIB_CRATES:
         if not (bundle / "lib" / f"lib{crate}.rlib").is_file():
             raise SystemExit(f"bundle is missing lib{crate}.rlib")
@@ -89,16 +88,18 @@ def main() -> int:
     parser.add_argument("--bundle", type=Path, default=os.environ.get("FOUR_P_CORELIB_BUNDLE"))
     parser.add_argument("--release", action="store_true")
     parser.add_argument("--test", action="store_true")
+    parser.add_argument("--target")
     parser.add_argument("cargo_args", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.bundle is None:
         raise SystemExit("pass --bundle or set FOUR_P_CORELIB_BUNDLE")
     requested_bundle = args.bundle.resolve()
     bundle, temporary_root = resolve_bundle(requested_bundle)
-    manifest = validate_bundle(bundle)
+    target = args.target or rustc_info()["host"]
+    manifest = validate_bundle(bundle, target)
     env = os.environ.copy()
     env["FOUR_P_CORELIB_BUNDLE"] = str(bundle)
-    wrapper_name = "corelib-rustc-wrapper.cmd" if os.name == "nt" else "corelib-rustc-wrapper.py"
+    wrapper_name = "corelib-rustc-wrapper.exe" if os.name == "nt" else "corelib-rustc-wrapper.py"
     env["RUSTC_WRAPPER"] = str((Path(__file__).parent / wrapper_name).resolve())
     for key in ("version", "git_commit", "target", "rustc_release", "workspace_features"):
         env[f"FOUR_P_CORELIB_{key.upper()}"] = manifest[key]
@@ -118,6 +119,8 @@ def main() -> int:
     command = ["cargo", "test" if args.test else "build", "--locked"]
     if args.release:
         command.append("--release")
+    if args.target is not None:
+        command.extend(["--target", args.target])
     command.extend(args.cargo_args)
     try:
         return subprocess.run(command, env=env, check=False).returncode
