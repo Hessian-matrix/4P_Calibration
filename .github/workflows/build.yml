@@ -54,12 +54,12 @@ jobs:
           name="camera_corelib-${CORELIB_VERSION}-${{ matrix.target }}-rlibs.tar.gz"
           gh release download "${CORELIB_RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --pattern "${name}" --dir corelib-dist
           echo "CORELIB_ARCHIVE=${PWD}/corelib-dist/${name}" >> "${GITHUB_ENV}"
-      - name: Test
-        shell: bash
-        run: python3 tools/build.py --bundle "${CORELIB_ARCHIVE}" --target "${{ matrix.target }}" --test
       - name: Build release
         shell: bash
         run: python3 tools/build.py --bundle "${CORELIB_ARCHIVE}" --target "${{ matrix.target }}" --release
+      - name: Test
+        shell: bash
+        run: python3 tools/build.py --bundle "${CORELIB_ARCHIVE}" --target "${{ matrix.target }}" --test
       - name: Stage application
         shell: bash
         run: |
