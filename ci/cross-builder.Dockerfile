@@ -14,14 +14,17 @@ RUN rustup component add clippy \
     && rustup target add \
         aarch64-unknown-linux-gnu \
         x86_64-pc-windows-gnu \
-        aarch64-apple-darwin \
-    && echo "${ZIG_SHA256}  /tmp/zig.tar.xz" | sha256sum -c - \
+        aarch64-apple-darwin
+
+RUN echo "${ZIG_SHA256}  /tmp/zig.tar.xz" | sha256sum -c - \
     && mkdir -p /opt/zig \
     && tar -xJf /tmp/zig.tar.xz --strip-components=1 -C /opt/zig \
-    && rm /tmp/zig.tar.xz \
-    && cargo install cargo-zigbuild --version "${CARGO_ZIGBUILD_VERSION}" --locked \
-    && clippy-driver --version \
-    && /opt/zig/zig version \
-    && cargo zigbuild --version
+    && rm /tmp/zig.tar.xz
 
 ENV PATH="/opt/zig:${PATH}"
+
+RUN cargo install cargo-zigbuild --version "${CARGO_ZIGBUILD_VERSION}" --locked
+
+RUN clippy-driver --version \
+    && zig version \
+    && cargo zigbuild --help >/dev/null
