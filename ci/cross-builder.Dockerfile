@@ -13,7 +13,7 @@ COPY ci/zig-linux-x86_64-0.13.0.tar.xz /tmp/zig.tar.xz
 RUN rustup component add clippy \
     && rustup target add \
         aarch64-unknown-linux-gnu \
-        x86_64-pc-windows-gnu \
+        x86_64-pc-windows-gnullvm \
         aarch64-apple-darwin
 
 RUN echo "${ZIG_SHA256}  /tmp/zig.tar.xz" | sha256sum -c - \

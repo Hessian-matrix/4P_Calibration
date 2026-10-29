@@ -13,7 +13,7 @@ import urllib.request
 EXPECTED_BINARIES = {
     "four-p-calibration-x86_64-unknown-linux-gnu",
     "four-p-calibration-aarch64-unknown-linux-gnu",
-    "four-p-calibration-x86_64-pc-windows-gnu.exe",
+    "four-p-calibration-x86_64-pc-windows-gnullvm.exe",
     "four-p-calibration-aarch64-apple-darwin",
 }
 

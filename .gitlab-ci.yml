@@ -90,9 +90,9 @@ build:windows-x86_64:
   stage: build
   needs: [verify:linux]
   script:
-    - cargo zigbuild --release --locked --target x86_64-pc-windows-gnu
+    - cargo zigbuild --release --locked --target x86_64-pc-windows-gnullvm
     - mkdir -p dist
-    - cp target/x86_64-pc-windows-gnu/release/four-p-calibration.exe dist/four-p-calibration-x86_64-pc-windows-gnu.exe
+    - cp target/x86_64-pc-windows-gnullvm/release/four-p-calibration.exe dist/four-p-calibration-x86_64-pc-windows-gnullvm.exe
   artifacts:
     paths: [dist/]
     expire_in: 7 days
