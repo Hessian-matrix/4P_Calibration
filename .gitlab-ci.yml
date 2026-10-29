@@ -16,7 +16,7 @@ variables:
   CARGO_HOME: "$CI_PROJECT_DIR/.cargo-home"
   CORP_INDEX_SSH: "ssh://git@10.21.12.53:2222/corp/rd/camera_corelib.git"
   CORP_INDEX_HTTP: "http://10.21.12.53:8929/corp/rd/camera_corelib.git"
-  CROSS_BUILDER_IMAGE: "$CI_REGISTRY_IMAGE/ci-rust-cross:1.98.1-zig-0.13.0-v2"
+  CROSS_BUILDER_IMAGE: "$CI_REGISTRY_IMAGE/ci-rust-cross:1.98.1-zig-0.13.0-v3"
 
 default:
   cache: &cargo_cache
