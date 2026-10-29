@@ -39,7 +39,7 @@ build:cross-builder-image:
   cache: []
   stage: prepare
   image:
-    name: "$CI_REGISTRY_IMAGE/ci-tools/kaniko:v1.23.2-debug"
+    name: "gcr.io/kaniko-project/executor:v1.23.2-debug"
     entrypoint: [""]
   tags: [wsl, docker]
   rules:
