@@ -83,6 +83,7 @@ def validate_bundle(bundle: Path, target: str) -> dict[str, str]:
     return manifest
 
 
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build 4P with a verified camera_corelib rlib bundle.")
     parser.add_argument("--bundle", type=Path, default=os.environ.get("FOUR_P_CORELIB_BUNDLE"))
@@ -106,10 +107,7 @@ def main() -> int:
     env["FOUR_P_CORELIB_ARTIFACT_SHA256"] = (
         sha256(requested_bundle) if requested_bundle.is_file() else sha256(bundle / "MANIFEST.txt")
     )
-    rustdoc_flags = [
-        "-L", f"dependency={bundle / 'deps'}",
-        "-L", f"dependency={bundle / 'host-deps'}",
-    ]
+    rustdoc_flags = []
     for crate in CORELIB_CRATES:
         rustdoc_flags.extend(["--extern", f"{crate}={bundle / 'lib' / f'lib{crate}.rlib'}"])
     existing_rustdoc_flags = env.get("RUSTDOCFLAGS")
