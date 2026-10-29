@@ -4,6 +4,7 @@ workflow:
     - if: '$CI_COMMIT_BRANCH'
 
 stages:
+  - prepare
   - verify
   - build
   - release
@@ -15,37 +16,44 @@ variables:
   CARGO_HOME: "$CI_PROJECT_DIR/.cargo-home"
   CORP_INDEX_SSH: "ssh://git@10.21.12.53:2222/corp/rd/camera_corelib.git"
   CORP_INDEX_HTTP: "http://10.21.12.53:8929/corp/rd/camera_corelib.git"
+  CROSS_BUILDER_IMAGE: "$CI_REGISTRY_IMAGE/ci-rust-cross:1.98.1-zig-0.13.0-v1"
 
 default:
   cache:
-    key: "cargo-${CI_COMMIT_REF_SLUG}"
+    key:
+      files: [Cargo.lock]
+      prefix: cargo-v1
     paths:
       - .cargo-home/registry/
       - .cargo-home/git/
-      - .ci-tools/
-    policy: pull-push
+    policy: pull
 
 .registry-linux:
-  image: "$CI_REGISTRY/corp/rd/camera_corelib/ci-rust:1.98.1-bookworm-v1"
+  image: "$CROSS_BUILDER_IMAGE"
   tags: [wsl, docker]
   before_script:
     - export CARGO_REGISTRIES_CORP_TOKEN="Basic $(printf 'gitlab-ci-token:%s' "$CI_JOB_TOKEN" | base64 -w0)"
     - git config --global url."http://gitlab-ci-token:${CI_JOB_TOKEN}@10.21.12.53:8929/corp/rd/camera_corelib.git".insteadOf "$CORP_INDEX_SSH"
 
-.zig-cross:
-  extends: .registry-linux
-  before_script:
-    - !reference [.registry-linux, before_script]
-    - mkdir -p .ci-tools
-    - test -x .ci-tools/zig/zig || (python3 -c 'import urllib.request; urllib.request.urlretrieve("https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz", ".ci-tools/zig.tar.xz")' && tar -xJf .ci-tools/zig.tar.xz -C .ci-tools && mv .ci-tools/zig-linux-x86_64-0.13.0 .ci-tools/zig)
-    - export PATH="$CI_PROJECT_DIR/.ci-tools/zig:$CARGO_HOME/bin:$PATH"
-    - command -v cargo-zigbuild >/dev/null || cargo install cargo-zigbuild --version 0.20.1 --locked
+build:cross-builder-image:
+  cache: []
+  stage: prepare
+  image:
+    name: gcr.io/kaniko-project/executor:v1.23.2-debug
+    entrypoint: [""]
+  tags: [wsl, docker]
+  rules:
+    - changes: [ci/cross-builder.Dockerfile]
+  script:
+    - mkdir -p /kaniko/.docker
+    - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"$CI_REGISTRY_USER\",\"password\":\"$CI_REGISTRY_PASSWORD\"}}}" > /kaniko/.docker/config.json
+    - /kaniko/executor --context "$CI_PROJECT_DIR" --dockerfile "$CI_PROJECT_DIR/ci/cross-builder.Dockerfile" --destination "$CROSS_BUILDER_IMAGE" --cache=true --cache-repo "$CI_REGISTRY_IMAGE/ci-cache" --insecure-registry "$CI_REGISTRY"
+
 
 verify:linux:
   extends: .registry-linux
-  before_script:
-    - !reference [.registry-linux, before_script]
-    - rustup component add clippy
+  cache:
+    policy: pull-push
   stage: verify
   script:
     - cargo test --locked
@@ -65,12 +73,9 @@ build:linux-x86_64:
     expire_in: 7 days
 
 build:linux-aarch64:
-  extends: .zig-cross
+  extends: .registry-linux
   stage: build
   needs: [verify:linux]
-  before_script:
-    - !reference [.zig-cross, before_script]
-    - rustup target add aarch64-unknown-linux-gnu
   script:
     - cargo zigbuild --release --locked --target aarch64-unknown-linux-gnu
     - mkdir -p dist
@@ -80,12 +85,9 @@ build:linux-aarch64:
     expire_in: 7 days
 
 build:windows-x86_64:
-  extends: .zig-cross
+  extends: .registry-linux
   stage: build
   needs: [verify:linux]
-  before_script:
-    - !reference [.zig-cross, before_script]
-    - rustup target add x86_64-pc-windows-gnu
   script:
     - cargo zigbuild --release --locked --target x86_64-pc-windows-gnu
     - mkdir -p dist
@@ -96,12 +98,9 @@ build:windows-x86_64:
 
 
 build:macos-aarch64:
-  extends: .zig-cross
+  extends: .registry-linux
   stage: build
   needs: [verify:linux]
-  before_script:
-    - !reference [.zig-cross, before_script]
-    - rustup target add aarch64-apple-darwin
   script:
     - cargo zigbuild --release --locked --target aarch64-apple-darwin
     - mkdir -p dist
