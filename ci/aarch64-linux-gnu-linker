@@ -1,0 +1,2 @@
+#!/bin/sh
+exec env LIBRARY_PATH=/usr/aarch64-linux-gnu/lib aarch64-linux-gnu-gcc "$@"
