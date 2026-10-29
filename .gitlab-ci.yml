@@ -76,6 +76,25 @@ build:windows-x86_64:
     expire_in: 7 days
 
 
+build:macos-aarch64:
+  extends: .registry-linux
+  stage: build
+  needs: [verify:linux]
+  before_script:
+    - !reference [.registry-linux, before_script]
+    - rustup target add aarch64-apple-darwin
+    - python3 -c 'import urllib.request; urllib.request.urlretrieve("https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz", "/tmp/zig.tar.xz")'
+    - tar -xJf /tmp/zig.tar.xz -C /tmp
+    - export PATH="/tmp/zig-linux-x86_64-0.13.0:$PATH"
+    - cargo install cargo-zigbuild --version 0.20.1 --locked
+  script:
+    - cargo zigbuild --release --locked --target aarch64-apple-darwin
+    - mkdir -p dist
+    - cp target/aarch64-apple-darwin/release/four-p-calibration dist/four-p-calibration-aarch64-apple-darwin
+  artifacts:
+    paths: [dist/]
+    expire_in: 7 days
+
 release:github:
   extends: .registry-linux
   stage: release
@@ -87,6 +106,8 @@ release:github:
     - job: build:linux-aarch64
       artifacts: true
     - job: build:windows-x86_64
+      artifacts: true
+    - job: build:macos-aarch64
       artifacts: true
   script:
     - python3 tools/publish_gitlab_release.py --tag "$CI_COMMIT_TAG" --assets dist

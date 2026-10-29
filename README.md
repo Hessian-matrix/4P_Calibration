@@ -15,7 +15,7 @@ cargo run --release -- --config config/calibration.yaml
 cargo test --locked
 ```
 
-正式发布仅由内部 GitLab CI 执行。CI 在 Linux runner 上构建 Linux x86-64，并交叉构建 Linux ARM64 与 Windows x86-64 GNU；仅原生 Linux x86-64 产物执行 `--help` 启动检查。三项目标必须全部构建成功，随后 release job 才会先创建 GitLab 内部 Release，再在 GitHub 文档/发布仓库创建对应 Release；两边均上传同一组三个可执行文件和 `SHA256SUMS`。任一构建或任一发布端失败时，不会继续后续发布。
+正式发布仅由内部 GitLab CI 执行。CI 在 Linux runner 上构建 Linux x86-64，并交叉构建 Linux ARM64、Windows x86-64 GNU 与 macOS ARM64；仅原生 Linux x86-64 产物执行 `--help` 启动检查。四项目标必须全部构建成功，随后 release job 才会先创建 GitLab 内部 Release，再在 GitHub 文档/发布仓库创建对应 Release；两边均上传同一组四个可执行文件和 `SHA256SUMS`。任一构建或任一发布端失败时，不会继续后续发布。
 
 流程：数据源扫描 → 传感器与任务模式 → 标定板 → 求解设置 → 启动检查 → 运行监控 → 结果检查。勾选或取消相机/IMU 话题时自动推断模式：未选 IMU 时，1 路相机为单 Cam，2 路及以上为多 Cam；选中 IMU 时为多 Cam+IMU。零相机或相机–IMU 模式不足两路相机时仍由预检阻止启动。可手动调整模式，下一次话题选择变更会重新推断。配置各部分可返回修改，运行使用不可变快照；结果页可修改配置或使用相同配置创建独立的新运行。
 
