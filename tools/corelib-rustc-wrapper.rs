@@ -31,10 +31,15 @@ fn main() {
             }
         }
     }
-    rustc_args.push("-L".into());
-    rustc_args.push(format!("dependency={}", bundle.join("deps").display()).into());
-    rustc_args.push("-L".into());
-    rustc_args.push(format!("dependency={}", bundle.join("host-deps").display()).into());
+    rustc_args.splice(
+        0..0,
+        [
+            "-L".into(),
+            format!("dependency={}", bundle.join("deps").display()).into(),
+            "-L".into(),
+            format!("dependency={}", bundle.join("host-deps").display()).into(),
+        ],
+    );
     if env::var_os("CARGO_PRIMARY_PACKAGE").as_deref() == Some("1".as_ref()) {
         for crate_name in CRATES {
             rustc_args.push("--extern".into());

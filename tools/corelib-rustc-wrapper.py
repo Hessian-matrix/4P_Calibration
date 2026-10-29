@@ -30,7 +30,7 @@ def main() -> int:
             crate = str(args[index + 1]).split("=", 1)[0]
             if crate in shared:
                 args[index + 1] = f"{crate}={shared[crate]}"
-    args.extend(["-L", f"dependency={bundle / 'deps'}", "-L", f"dependency={bundle / 'host-deps'}"])
+    args[0:0] = ["-L", f"dependency={bundle / 'deps'}", "-L", f"dependency={bundle / 'host-deps'}"]
     if os.environ.get("CARGO_PRIMARY_PACKAGE") == "1":
         for crate in CORELIB_CRATES:
             args.extend(["--extern", f"{crate}={bundle / 'lib' / f'lib{crate}.rlib'}"])
