@@ -24,6 +24,9 @@ variables:
 
 verify:linux:
   extends: .registry-linux
+  before_script:
+    - !reference [.registry-linux, before_script]
+    - rustup component add clippy
   stage: verify
   script:
     - cargo test --locked
