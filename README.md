@@ -12,9 +12,7 @@
 - macOS ARM64
 - `SHA256SUMS`
 
-发布由内部 GitLab CI 构建。四个平台必须全部完成构建、测试和启动检查，才会创建 GitHub Release；不发布部分成功版本。
-
-## 校验
+发布由内部 GitLab CI 构建。Linux x86-64 原生构建与启动检查、Linux ARM64、Windows x86-64 GNU 和 macOS ARM64 交叉构建必须全部成功，才会同时创建 GitLab 内部 Release 与 GitHub Release；两边使用同一组二进制和校验和，不发布部分成功版本。
 
 下载后校验文件摘要：
 
@@ -28,14 +26,15 @@ macOS 可使用：
 shasum -a 256 -c SHA256SUMS
 ```
 
+
 ## 运行
 
 ```sh
-# Linux / macOS
+# Linux
 ./four-p-calibration-<target> --help
 
 # Windows PowerShell
-.\four-p-calibration-x86_64-pc-windows-msvc.exe --help
+.\four-p-calibration-x86_64-pc-windows-gnu.exe --help
 ```
 
 无参数启动交互式 TUI。批处理模式：
