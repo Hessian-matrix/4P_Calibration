@@ -19,7 +19,7 @@ variables:
   CROSS_BUILDER_IMAGE: "$CI_REGISTRY_IMAGE/ci-rust-cross:1.98.1-zig-0.13.0-v1"
 
 default:
-  cache:
+  cache: &cargo_cache
     key:
       files: [Cargo.lock]
       prefix: cargo-v1
@@ -54,6 +54,7 @@ build:cross-builder-image:
 verify:linux:
   extends: .registry-linux
   cache:
+    <<: *cargo_cache
     policy: pull-push
   stage: verify
   script:
