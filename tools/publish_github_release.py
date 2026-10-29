@@ -48,15 +48,18 @@ def main() -> None:
     if not token:
         raise SystemExit("GITHUB_RELEASE_TOKEN is required")
 
-    assets = {path.name: path for path in args.assets.iterdir() if path.is_file()}
-    if set(assets) != EXPECTED_ASSETS:
-        raise SystemExit(f"release assets mismatch: expected={sorted(EXPECTED_ASSETS)}, got={sorted(assets)}")
+    binaries = {
+        path.name: path for path in args.assets.iterdir()
+        if path.is_file() and path.name != "SHA256SUMS"
+    }
+    if set(binaries) != EXPECTED_ASSETS:
+        raise SystemExit(f"release assets mismatch: expected={sorted(EXPECTED_ASSETS)}, got={sorted(binaries)}")
     checksums = args.assets / "SHA256SUMS"
     checksums.write_text(
-        "".join(f"{hashlib.sha256(assets[name].read_bytes()).hexdigest()}  {name}\n" for name in sorted(assets)),
+        "".join(f"{hashlib.sha256(binaries[name].read_bytes()).hexdigest()}  {name}\n" for name in sorted(binaries)),
         encoding="utf-8",
     )
-    assets[checksums.name] = checksums
+    assets = {**binaries, checksums.name: checksums}
 
     api = f"https://api.github.com/repos/{REPOSITORY}"
     main_ref = request(f"{api}/git/ref/heads/main", token)

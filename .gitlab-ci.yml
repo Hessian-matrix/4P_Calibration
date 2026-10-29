@@ -112,4 +112,5 @@ release:github:
     - job: build:macos-aarch64
       artifacts: true
   script:
+    - python3 tools/publish_gitlab_release.py --tag "$CI_COMMIT_TAG" --assets dist
     - python3 tools/publish_github_release.py --tag "$CI_COMMIT_TAG" --assets dist
