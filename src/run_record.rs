@@ -45,15 +45,15 @@ struct CorelibProvenance {
 }
 
 impl CorelibProvenance {
-    const fn bundled() -> Self {
+    const fn current() -> Self {
         Self {
-            distribution: "rlib_bundle",
-            workspace_version: env!("FOUR_P_CORELIB_VERSION"),
-            git_commit: env!("FOUR_P_CORELIB_GIT_COMMIT"),
-            target: env!("FOUR_P_CORELIB_TARGET"),
-            rustc_release: env!("FOUR_P_CORELIB_RUSTC_RELEASE"),
-            artifact_sha256: env!("FOUR_P_CORELIB_ARTIFACT_SHA256"),
-            profile: env!("FOUR_P_CORELIB_WORKSPACE_FEATURES"),
+            distribution: "corp_registry",
+            workspace_version: "ccl_calib=0.4.0,ccl_geometry=0.1.0,ccl_image=0.3.0,ccl_rosbag=0.3.0",
+            git_commit: "registry_index",
+            target: "cargo_target",
+            rustc_release: "1.98.1",
+            artifact_sha256: "Cargo.lock",
+            profile: "cargo_registry",
         }
     }
 }
@@ -107,7 +107,7 @@ impl RunContext {
                 status: RunStatus::InProgress,
                 mode: None,
                 application_version: env!("CARGO_PKG_VERSION").to_owned(),
-                corelib: CorelibProvenance::bundled(),
+                corelib: CorelibProvenance::current(),
                 error_category: None,
                 stage_duration_ms: BTreeMap::new(),
             })),

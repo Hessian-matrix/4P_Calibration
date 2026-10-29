@@ -1,2 +1,6 @@
+[registries.corp]
+index = "ssh://git@10.21.12.53:2222/corp/rd/camera_corelib.git"
+credential-provider = "cargo:token"
+
 [net]
 git-fetch-with-cli = true

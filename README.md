@@ -4,18 +4,18 @@
 
 仓库只保留 ROS bag 输入适配、结果导出与薄 Ratatui 壳。AprilTag 检测、相机模型、投影、位姿、内外参、相机—IMU 和可观测性全部调用 `camera_corelib`；本仓库不维护第二套核心算法。
 
-`camera_corelib` 以完整 workspace 的预编译 `.rlib` bundle 交付；bundle 固定 Rust 1.98.1、目标平台、corelib commit 和 `--all-features` profile。4P 只链接 `ccl_image`、`ccl_calib`、`ccl_geometry` 和 `ccl_rosbag`，但发布压缩包保留全部 workspace crate。
+`camera_corelib` 的各 crate 作为独立 `.crate` 发布在内部 GitLab `corp` Cargo registry。4P 固定依赖 `ccl_image`、`ccl_calib`、`ccl_geometry` 和 `ccl_rosbag` 的精确版本，由 Cargo 在统一依赖图中编译；不再分发或注入预编译 `.rlib`。
 
 ## 构建与运行
 
-先从对应 GitHub Release 下载当前平台的 `camera_corelib-<version>-<target>-rlibs.tar.gz`，再通过唯一构建入口校验并构建：
+配置 `corp` registry 凭据后使用标准 Cargo 入口：
 
 ```sh
-python3 tools/build.py --bundle /path/to/camera_corelib-0.6.0-<target>-rlibs.tar.gz --release
-target/release/four-p-calibration
+cargo run --release -- --config config/calibration.yaml
+cargo test --locked
 ```
 
-`tools/build.py` 固定接受 corelib `0.6.0`、提交 `d279273e2ae6bd7a21738d108837ded12fc6c64a`，并拒绝 rustc release/commit、host/target、feature profile 或必需 `.rlib` 不匹配的包；不回退到相邻源码。运行记录写入 bundle 版本、commit、target、rustc 和压缩包 SHA-256。直接 `cargo build/run/test` 不构成受支持入口。
+正式发布仅由内部 GitLab CI 执行。Linux x86-64、Linux ARM64、Windows x86-64 和 macOS ARM64 四个平台必须全部完成构建、测试和实际 `--help` 启动检查，随后 release job 才会在 GitHub 的文档/发布仓库创建 tag，上传四个可执行文件和 `SHA256SUMS`。任一平台失败或缺少 runner 时不会创建 GitHub Release。
 
 流程：数据源扫描 → 传感器与任务模式 → 标定板 → 求解设置 → 启动检查 → 运行监控 → 结果检查。勾选或取消相机/IMU 话题时自动推断模式：未选 IMU 时，1 路相机为单 Cam，2 路及以上为多 Cam；选中 IMU 时为多 Cam+IMU。零相机或相机–IMU 模式不足两路相机时仍由预检阻止启动。可手动调整模式，下一次话题选择变更会重新推断。配置各部分可返回修改，运行使用不可变快照；结果页可修改配置或使用相同配置创建独立的新运行。
 

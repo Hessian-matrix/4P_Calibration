@@ -1,0 +1,115 @@
+workflow:
+  rules:
+    - if: '$CI_COMMIT_TAG'
+    - if: '$CI_COMMIT_BRANCH'
+
+stages:
+  - verify
+  - build
+  - release
+
+variables:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUSTUP_TOOLCHAIN: "1.98.1"
+  CORP_INDEX_SSH: "ssh://git@10.21.12.53:2222/corp/rd/camera_corelib.git"
+  CORP_INDEX_HTTP: "http://10.21.12.53:8929/corp/rd/camera_corelib.git"
+
+.registry-linux:
+  image: "$CI_REGISTRY/corp/rd/camera_corelib/ci-rust:1.98.1-bookworm-v1"
+  tags: [wsl, docker]
+  before_script:
+    - export CARGO_REGISTRIES_CORP_TOKEN="Basic $(printf 'gitlab-ci-token:%s' "$CI_JOB_TOKEN" | base64 -w0)"
+    - git config --global url."http://gitlab-ci-token:${CI_JOB_TOKEN}@10.21.12.53:8929/corp/rd/camera_corelib.git".insteadOf "$CORP_INDEX_SSH"
+
+verify:linux:
+  extends: .registry-linux
+  stage: verify
+  script:
+    - cargo test --locked
+    - cargo clippy --all-targets --locked -- -D clippy::correctness
+
+build:linux-x86_64:
+  extends: .registry-linux
+  stage: build
+  needs: [verify:linux]
+  script:
+    - cargo build --release --locked
+    - target/release/four-p-calibration --help
+    - mkdir -p dist
+    - cp target/release/four-p-calibration dist/four-p-calibration-x86_64-unknown-linux-gnu
+  artifacts:
+    paths: [dist/]
+    expire_in: 7 days
+
+build:linux-aarch64:
+  extends: .registry-linux
+  stage: build
+  needs: [verify:linux]
+  before_script:
+    - !reference [.registry-linux, before_script]
+    - rustup target add aarch64-unknown-linux-gnu
+    - apt-get update && apt-get install -y gcc-aarch64-linux-gnu qemu-user
+    - export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+    - export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER="qemu-aarch64 -L /usr/aarch64-linux-gnu"
+  script:
+    - cargo build --release --locked --target aarch64-unknown-linux-gnu
+    - target/aarch64-unknown-linux-gnu/release/four-p-calibration --help
+    - mkdir -p dist
+    - cp target/aarch64-unknown-linux-gnu/release/four-p-calibration dist/four-p-calibration-aarch64-unknown-linux-gnu
+  artifacts:
+    paths: [dist/]
+    expire_in: 7 days
+
+build:windows-x86_64:
+  stage: build
+  needs: [verify:linux]
+  tags: [windows]
+  before_script:
+    - $pair = "gitlab-ci-token:$env:CI_JOB_TOKEN"
+    - $env:CARGO_REGISTRIES_CORP_TOKEN = "Basic " + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($pair))
+    - git config --global "url.http://gitlab-ci-token:$env:CI_JOB_TOKEN@10.21.12.53:8929/corp/rd/camera_corelib.git.insteadOf" $env:CORP_INDEX_SSH
+  script:
+    - cargo test --locked
+    - cargo build --release --locked
+    - .\target\release\four-p-calibration.exe --help
+    - New-Item -ItemType Directory -Force dist | Out-Null
+    - Copy-Item target\release\four-p-calibration.exe dist\four-p-calibration-x86_64-pc-windows-msvc.exe
+  artifacts:
+    paths: [dist/]
+    expire_in: 7 days
+
+build:macos-aarch64:
+  stage: build
+  needs: [verify:linux]
+  tags: [macos-aarch64]
+  before_script:
+    - export CARGO_REGISTRIES_CORP_TOKEN="Basic $(printf 'gitlab-ci-token:%s' "$CI_JOB_TOKEN" | base64)"
+    - git config --global url."http://gitlab-ci-token:${CI_JOB_TOKEN}@10.21.12.53:8929/corp/rd/camera_corelib.git".insteadOf "$CORP_INDEX_SSH"
+    - test "$(rustc -vV | awk '/^host:/ {print $2}')" = "aarch64-apple-darwin"
+  script:
+    - cargo test --locked
+    - cargo build --release --locked
+    - target/release/four-p-calibration --help
+    - mkdir -p dist
+    - cp target/release/four-p-calibration dist/four-p-calibration-aarch64-apple-darwin
+  artifacts:
+    paths: [dist/]
+    expire_in: 7 days
+
+release:github:
+  extends: .registry-linux
+  stage: release
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+$/'
+  needs:
+    - job: build:linux-x86_64
+      artifacts: true
+    - job: build:linux-aarch64
+      artifacts: true
+    - job: build:windows-x86_64
+      artifacts: true
+    - job: build:macos-aarch64
+      artifacts: true
+  script:
+    - python3 tools/publish_github_release.py --tag "$CI_COMMIT_TAG" --assets dist

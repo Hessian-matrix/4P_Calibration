@@ -9,6 +9,10 @@ publish = false
 
 [dependencies]
 anyhow = "1"
+ccl_calib = { version = "=0.4.0", registry = "corp" }
+ccl_geometry = { version = "=0.1.0", registry = "corp" }
+ccl_image = { version = "=0.3.0", registry = "corp" }
+ccl_rosbag = { version = "=0.3.0", registry = "corp", features = ["ccl-adapters"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
