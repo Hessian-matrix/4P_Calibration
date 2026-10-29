@@ -79,7 +79,7 @@ build:linux-aarch64:
   stage: build
   needs: [verify:linux]
   script:
-    - RUSTFLAGS="-C link-arg=-B/usr/aarch64-linux-gnu/lib/" CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc cargo build --release --locked --target aarch64-unknown-linux-gnu
+    - RUSTFLAGS="-C link-arg=--sysroot=/usr/aarch64-linux-gnu" CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc cargo build --release --locked --target aarch64-unknown-linux-gnu
     - mkdir -p dist
     - cp target/aarch64-unknown-linux-gnu/release/four-p-calibration dist/four-p-calibration-aarch64-unknown-linux-gnu
   artifacts:
