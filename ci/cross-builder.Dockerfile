@@ -8,6 +8,10 @@ ENV RUSTUP_DIST_SERVER="https://rsproxy.cn"
 ENV RUSTUP_UPDATE_ROOT="https://rsproxy.cn/rustup"
 ENV CARGO_REGISTRIES_CRATES_IO_INDEX="sparse+https://rsproxy.cn/index/"
 
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends gcc-aarch64-linux-gnu \
+    && rm -rf /var/lib/apt/lists/*
 COPY ci/zig-linux-x86_64-0.13.0.tar.xz /tmp/zig.tar.xz
 
 RUN rustup component add clippy \
