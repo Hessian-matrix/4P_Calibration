@@ -47,7 +47,7 @@ build:cross-builder-image:
   script:
     - mkdir -p /kaniko/.docker
     - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"$CI_REGISTRY_USER\",\"password\":\"$CI_REGISTRY_PASSWORD\"}}}" > /kaniko/.docker/config.json
-    - wget --header="JOB-TOKEN:$CI_JOB_TOKEN" -O "$CI_PROJECT_DIR/ci/zig-linux-x86_64-0.13.0.tar.xz" "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/ci-toolchain/zig-0.13.0/zig-linux-x86_64-0.13.0.tar.xz"
+    - wget --header="JOB-TOKEN:$CI_JOB_TOKEN" -O "$CI_PROJECT_DIR/ci/zig-linux-x86_64-0.13.0.tar.xz" "$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/ci-toolchain/zig-0.13.0-r1/zig-linux-x86_64-0.13.0.tar.xz"
     - /kaniko/executor --context "$CI_PROJECT_DIR" --dockerfile "$CI_PROJECT_DIR/ci/cross-builder.Dockerfile" --destination "$CROSS_BUILDER_IMAGE" --cache=true --cache-repo "$CI_REGISTRY_IMAGE/ci-cache" --insecure-registry "$CI_REGISTRY"
 
 
