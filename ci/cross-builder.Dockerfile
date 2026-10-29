@@ -10,7 +10,7 @@ ENV CARGO_REGISTRIES_CRATES_IO_INDEX="sparse+https://rsproxy.cn/index/"
 
 
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends gcc-aarch64-linux-gnu \
+    && apt-get install --yes --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
     && rm -rf /var/lib/apt/lists/*
 COPY ci/zig-linux-x86_64-0.13.0.tar.xz /tmp/zig.tar.xz
 
