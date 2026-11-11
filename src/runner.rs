@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, ensure};
 use ccl_calib::camera::continuous_time::{
     ContinuousTimeCalibrationRequest, ContinuousTimeCalibrationResult,
-    ContinuousTimeInitializationRequest, ContinuousTimeSolverConfig, calibrate_continuous_time,
-    initialize_continuous_time, supported_camera_interval,
+    ContinuousTimeInitializationRequest, ContinuousTimeSolverConfig, MotionAlignedVisualWeights,
+    calibrate_continuous_time, initialize_continuous_time, supported_camera_interval,
 };
 use ccl_calib::camera::inertial::{
     ImuBias, ImuNoise, ImuSequence, IntegrationConfig as CoreIntegrationConfig,
@@ -31,13 +31,14 @@ use ccl_geometry::Pose3;
 use serde::Serialize;
 
 use crate::config::{
-    CalibrationConfig, InertialMethod, InitialIntrinsicsConfig, RunSettings, TargetConfig,
-    TimeOffsetConfig,
+    CalibrationConfig, CameraTimestampReference, InertialMethod, InitialIntrinsicsConfig,
+    RunSettings, TargetConfig, TimeOffsetConfig,
 };
 use crate::detection::{DetectedDataset, DetectedView};
 use crate::export::{
-    AcceptanceStatus, CalibrationOutput, CameraOutput, ImuAxisCalibrationOutput, InertialOutput,
-    NamedPose, PoseOutput, RESULT_SCHEMA_VERSION, load_result, publish,
+    AcceptanceStatus, CalibrationOutput, CameraOutput, CameraTimeOffsetOutput,
+    ImuAxisCalibrationOutput, InertialOutput, NamedPose, PoseOutput, RESULT_SCHEMA_VERSION,
+    load_result, publish,
 };
 use crate::input;
 use crate::run_record::RunContext;
@@ -81,6 +82,104 @@ pub struct SolveSummary {
     pub inertial_whitened_rms: Option<f64>,
     /// Local-curvature marginal standard deviations in each optimization coordinate's unit.
     pub parameter_standard_deviations: Vec<ParameterStandardDeviation>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ExposureDiagnostics {
+    schema_version: u32,
+    projection_model: &'static str,
+    cameras: Vec<CameraExposureDiagnostics>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct CameraExposureDiagnostics {
+    camera_index: usize,
+    camera_id: String,
+    timestamp_reference: CameraTimestampReference,
+    fixed_exposure_duration_s: Option<f64>,
+    exposure_metadata_topic: Option<String>,
+    exposure_duration_s_range: Option<[f64; 2]>,
+    status: &'static str,
+    used_points: usize,
+    rejected_points: usize,
+    unsupported_points: usize,
+    bins: Vec<ExposureBinSummary>,
+    anisotropy_cross_validation: Option<AnisotropyCrossValidation>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ExposureBinSummary {
+    predicted_motion_px: &'static str,
+    points: usize,
+    mean_predicted_motion_px: f64,
+    p95_predicted_motion_px: f64,
+    rms_reprojection_px: f64,
+    p95_reprojection_px: f64,
+    rms_geometric_average_reprojection_px: f64,
+    p95_geometric_average_reprojection_px: f64,
+    mean_squared_error_delta_px2: f64,
+    mean_geometric_midpoint_bias_px: f64,
+    p95_geometric_midpoint_bias_px: f64,
+    directional_points: usize,
+    mean_parallel_residual_px: Option<f64>,
+    rms_parallel_residual_px: Option<f64>,
+    rms_perpendicular_residual_px: Option<f64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AnisotropyCrossValidation {
+    temporal_block_s: f64,
+    eligible_points: usize,
+    folds: Vec<AnisotropyFoldSummary>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AnisotropyFoldSummary {
+    held_out_blocks: &'static str,
+    training_points: usize,
+    held_out_points: usize,
+    fitted_isotropic_sigma_px: f64,
+    fitted_perpendicular_sigma_px: f64,
+    fitted_parallel_variance_per_motion_squared: f64,
+    held_out_isotropic_mean_nll: f64,
+    held_out_anisotropic_mean_nll: f64,
+    held_out_mean_nll_delta: f64,
+    held_out_isotropic_whitened_rms: f64,
+    held_out_anisotropic_whitened_rms: f64,
+    held_out_volume_preserving_mean_nll: f64,
+    held_out_volume_preserving_mean_nll_delta: f64,
+    held_out_volume_preserving_whitened_rms: f64,
+}
+
+#[derive(Clone, Copy)]
+struct AnisotropySample {
+    fold: usize,
+    motion_squared: f64,
+    parallel_squared: f64,
+    perpendicular_squared: f64,
+}
+
+#[derive(Default)]
+struct ExposureBinAccumulator {
+    blur: Vec<f64>,
+    error: Vec<f64>,
+    geometric_average_error: Vec<f64>,
+    bias: Vec<f64>,
+    parallel_sum: f64,
+    parallel_squared_sum: f64,
+    perpendicular_squared_sum: f64,
+    directional_points: usize,
+}
+
+#[derive(Default)]
+struct CameraExposureAccumulator {
+    used_points: usize,
+    rejected_points: usize,
+    unsupported_points: usize,
+    bins: [ExposureBinAccumulator; 5],
+    minimum_duration_s: Option<f64>,
+    maximum_duration_s: Option<f64>,
+    anisotropy_samples: Vec<AnisotropySample>,
 }
 #[derive(Clone, Debug)]
 pub enum Event {
@@ -570,10 +669,35 @@ fn solve_continuous_inertial(
     stage: &dyn Fn(&'static str),
     run: &RunContext,
 ) -> Result<(CalibrationOutput, SolveSummary)> {
-    // 固定观测集覆盖整个时差搜索区间；外围 IMU 保留，不能随试探时差增删因子。
+    // Fix one observation set for the complete offset and affine-skew envelope; no trial value
+    // may add or remove factors. The input midpoint centers intercept and slope.
+    let camera_offset_config = imu_config.continuous_time.camera_time_offsets;
+    let clock_skew_config = imu_config.continuous_time.clock_skews;
+    let input_start_s = exact_views
+        .first()
+        .context("missing exact views")?
+        .time
+        .seconds();
+    let input_end_s = exact_views
+        .last()
+        .context("missing exact views")?
+        .time
+        .seconds();
+    let clock_reference_time_s = 0.5 * (input_start_s + input_end_s);
+    let maximum_centered_time_s = (input_start_s - clock_reference_time_s)
+        .abs()
+        .max((input_end_s - clock_reference_time_s).abs());
+    let maximum_skew_s_per_s = clock_skew_config
+        .minimum_ppm
+        .abs()
+        .max(clock_skew_config.maximum_ppm.abs())
+        * 1.0e-6;
+    let skew_components = usize::from(clock_skew_config.refine_global)
+        + usize::from(clock_skew_config.refine_cameras);
+    let drift_margin_s = maximum_centered_time_s * maximum_skew_s_per_s * skew_components as f64;
     let (camera_start_s, camera_end_s) = supported_camera_interval(
         imu,
-        core_time_offset(time_offset_config, None),
+        summed_time_offset_bounds(time_offset_config, camera_offset_config, drift_margin_s),
         imu_config.integration.max_gap_s,
     )?;
     let retained = |views: &[TimedView<'_>]| {
@@ -616,6 +740,9 @@ fn solve_continuous_inertial(
         Path::new("time_support.yaml"),
         &serde_json::json!({
             "camera_start_s": camera_start_s, "camera_end_s": camera_end_s,
+            "clock_reference_time_s": clock_reference_time_s,
+            "clock_skew_bounds_ppm": [clock_skew_config.minimum_ppm, clock_skew_config.maximum_ppm],
+            "drift_margin_s": drift_margin_s,
             "time_origin_ns": detected.time_origin_ns.map(|t| t.to_string()),
             "imu_samples": imu.samples().len(), "cameras": camera_counts,
             "input_seed_views": seed_views.len(), "used_seed_views": seed_range.len(),
@@ -626,6 +753,7 @@ fn solve_continuous_inertial(
         "continuous_time support=[{camera_start_s:.9},{camera_end_s:.9}] exact_views={}/{} seed_views={}/{} optimizer=basalt",
         exact_range.len(), exact_views.len(), seed_range.len(), seed_views.len()
     ))?;
+    let exact_detected_views = &detected.views[exact_range.clone()];
     let exact_views = &exact_views[exact_range];
     let seed_views = &seed_views[seed_range];
     ensure!(
@@ -652,6 +780,8 @@ fn solve_continuous_inertial(
     };
     let solver_config = continuous_solver_config(config, imu_config, imu)?;
     let initial_imu_calibration = imu_config.axis_calibration.core();
+    let initial_camera_time_offsets_s = vec![0.0; cameras.len()];
+    let initial_camera_clock_skews_s_per_s = vec![0.0; cameras.len()];
     stage("solve_visual_inertial_seed");
     let stage_started = Instant::now();
     let seed = initialize_continuous_time(
@@ -683,12 +813,21 @@ fn solve_continuous_inertial(
             cameras: &seed.cameras,
             views: exact_views,
             imu,
+            motion_aligned_visual_weights: None,
             initial_trajectory: &seed.trajectory,
             initial_camera_from_imu: &seed.camera_from_imu,
             initial_bias: seed.bias,
             initial_gravity_world_m_s2: seed.gravity_world_m_s2,
             time_offset: TimeOffset::Fixed(initial_offset_s),
+            clock_reference_time_s,
+            initial_clock_skew_s_per_s: 0.0,
+            clock_skew_bounds_s_per_s: None,
             initial_imu_calibration,
+            initial_camera_time_offsets_s: &initial_camera_time_offsets_s,
+            camera_time_offset_reference: reference_camera,
+            camera_time_offset_bounds_s: None,
+            initial_camera_clock_skews_s_per_s: &initial_camera_clock_skews_s_per_s,
+            camera_clock_skew_bounds_s_per_s: None,
             refine_intrinsics: false,
         },
         solver_config.clone(),
@@ -699,27 +838,98 @@ fn solve_continuous_inertial(
 
     let refine_axes = imu_config.axis_calibration.refine;
     let refine_time_offset = matches!(time_offset_config, TimeOffsetConfig::Estimate { .. });
-    let result = if refine_axes || refine_time_offset {
-        log_continuous_time_diagnostics(run, &baseline)?;
-        let refinement_stage = match (refine_axes, refine_time_offset) {
-            (true, true) => "solve_refine_imu_axes_time_offset",
-            (true, false) => "solve_refine_imu_axes",
-            (false, true) => "solve_refine_time_offset",
-            (false, false) => unreachable!("guarded by the surrounding condition"),
+    let refine_camera_time_offsets = camera_offset_config.refine;
+    let refine_clock_skews = clock_skew_config.refine_global || clock_skew_config.refine_cameras;
+    let refined =
+        if refine_axes || refine_time_offset || refine_camera_time_offsets || refine_clock_skews {
+            log_continuous_time_diagnostics(run, &baseline)?;
+            let refinement_stage = "solve_refine_continuous_time_parameters";
+            stage(refinement_stage);
+            let stage_started = Instant::now();
+            let refined = calibrate_continuous_time(
+                &ContinuousTimeCalibrationRequest {
+                    cameras: &baseline.cameras,
+                    views: exact_views,
+                    imu,
+                    motion_aligned_visual_weights: None,
+                    initial_trajectory: &baseline.trajectory,
+                    initial_camera_from_imu: &baseline.camera_from_imu,
+                    initial_bias: baseline.bias,
+                    initial_gravity_world_m_s2: baseline.gravity_world_m_s2,
+                    time_offset: core_time_offset(time_offset_config, Some(baseline.time_offset_s)),
+                    clock_reference_time_s,
+                    initial_clock_skew_s_per_s: baseline.clock_skew_s_per_s,
+                    clock_skew_bounds_s_per_s: clock_skew_config.refine_global.then_some((
+                        clock_skew_config.minimum_ppm * 1.0e-6,
+                        clock_skew_config.maximum_ppm * 1.0e-6,
+                    )),
+                    initial_imu_calibration: baseline.imu_calibration,
+                    initial_camera_time_offsets_s: &baseline.camera_time_offsets_s,
+                    camera_time_offset_reference: reference_camera,
+                    camera_time_offset_bounds_s: refine_camera_time_offsets.then_some((
+                        camera_offset_config.minimum_s,
+                        camera_offset_config.maximum_s,
+                    )),
+                    initial_camera_clock_skews_s_per_s: &baseline.camera_clock_skews_s_per_s,
+                    camera_clock_skew_bounds_s_per_s: clock_skew_config.refine_cameras.then_some((
+                        clock_skew_config.minimum_ppm * 1.0e-6,
+                        clock_skew_config.maximum_ppm * 1.0e-6,
+                    )),
+                    refine_intrinsics: false,
+                },
+                ContinuousTimeSolverConfig {
+                    refine_imu_calibration: refine_axes,
+                    ..solver_config.clone()
+                },
+                control,
+            )
+            .context("continuous-time time-offset/IMU-axis refinement failed")?;
+            run.record_stage_duration(refinement_stage, elapsed_millis(stage_started))?;
+            refined
+        } else {
+            baseline
         };
+    let anisotropy_config = imu_config.continuous_time.visual_motion_anisotropy;
+    let result = if anisotropy_config.enabled {
+        log_continuous_time_diagnostics(run, &refined)?;
+        let projected_motion_px =
+            exposure_motion_vectors(&refined, exact_views, exact_detected_views)?;
+        let refinement_stage = "solve_refine_visual_motion_anisotropy";
         stage(refinement_stage);
         let stage_started = Instant::now();
-        let refined = calibrate_continuous_time(
+        let anisotropic = calibrate_continuous_time(
             &ContinuousTimeCalibrationRequest {
-                cameras: &baseline.cameras,
+                cameras: &refined.cameras,
                 views: exact_views,
                 imu,
-                initial_trajectory: &baseline.trajectory,
-                initial_camera_from_imu: &baseline.camera_from_imu,
-                initial_bias: baseline.bias,
-                initial_gravity_world_m_s2: baseline.gravity_world_m_s2,
-                time_offset: core_time_offset(time_offset_config, Some(baseline.time_offset_s)),
-                initial_imu_calibration: baseline.imu_calibration,
+                motion_aligned_visual_weights: Some(MotionAlignedVisualWeights {
+                    projected_motion_px: &projected_motion_px,
+                    variance_ratio_per_motion_squared: anisotropy_config
+                        .variance_ratio_per_motion_squared,
+                }),
+                initial_trajectory: &refined.trajectory,
+                initial_camera_from_imu: &refined.camera_from_imu,
+                initial_bias: refined.bias,
+                initial_gravity_world_m_s2: refined.gravity_world_m_s2,
+                time_offset: core_time_offset(time_offset_config, Some(refined.time_offset_s)),
+                clock_reference_time_s,
+                initial_clock_skew_s_per_s: refined.clock_skew_s_per_s,
+                clock_skew_bounds_s_per_s: clock_skew_config.refine_global.then_some((
+                    clock_skew_config.minimum_ppm * 1.0e-6,
+                    clock_skew_config.maximum_ppm * 1.0e-6,
+                )),
+                initial_imu_calibration: refined.imu_calibration,
+                initial_camera_time_offsets_s: &refined.camera_time_offsets_s,
+                camera_time_offset_reference: reference_camera,
+                camera_time_offset_bounds_s: refine_camera_time_offsets.then_some((
+                    camera_offset_config.minimum_s,
+                    camera_offset_config.maximum_s,
+                )),
+                initial_camera_clock_skews_s_per_s: &refined.camera_clock_skews_s_per_s,
+                camera_clock_skew_bounds_s_per_s: clock_skew_config.refine_cameras.then_some((
+                    clock_skew_config.minimum_ppm * 1.0e-6,
+                    clock_skew_config.maximum_ppm * 1.0e-6,
+                )),
                 refine_intrinsics: false,
             },
             ContinuousTimeSolverConfig {
@@ -728,24 +938,449 @@ fn solve_continuous_inertial(
             },
             control,
         )
-        .context("continuous-time time-offset/IMU-axis refinement failed")?;
+        .context("continuous-time visual motion anisotropy refinement failed")?;
         run.record_stage_duration(refinement_stage, elapsed_millis(stage_started))?;
-        refined
+        anisotropic
     } else {
-        baseline
+        refined
     };
     log_continuous_time_diagnostics(run, &result)?;
+    write_exposure_diagnostics(config, &result, exact_views, exact_detected_views, run)?;
     let summary = continuous_time_solve_summary(&result, config);
     let trajectory = Trajectory::continuous(
         &result.trajectory,
         exact_views,
         result.time_offset_s,
+        result.clock_reference_time_s,
+        result.clock_skew_s_per_s,
         detected
             .time_origin_ns
             .context("missing trajectory time origin")?,
     )?;
     trajectory.write(run)?;
     Ok((continuous_time_output(config, detected, &result), summary))
+}
+
+fn exposure_motion_vectors(
+    result: &ContinuousTimeCalibrationResult,
+    views: &[TimedView<'_>],
+    detected_views: &[DetectedView],
+) -> Result<Vec<Vec<Vec<[f64; 2]>>>> {
+    ensure!(
+        views.len() == detected_views.len(),
+        "exposure motion view count mismatch"
+    );
+    views
+        .iter()
+        .zip(detected_views)
+        .map(|(view, detected_view)| {
+            view.observations
+                .iter()
+                .map(|observation| {
+                    let duration_s = detected_view
+                        .frames
+                        .iter()
+                        .find(|frame| frame.camera_index == observation.camera_index)
+                        .and_then(|frame| frame.exposure_duration_s)
+                        .context(
+                            "visual motion anisotropy requires exposure duration for every frame",
+                        )?;
+                    (0..observation.points.len())
+                        .map(|point| {
+                            let object = observation
+                                .points
+                                .object_point(point)
+                                .context("visual motion anisotropy object point is missing")?;
+                            let start = exposure_projection(
+                                result,
+                                observation.camera_index,
+                                view.time.seconds() - 0.5 * duration_s,
+                                object,
+                            )?;
+                            let end = exposure_projection(
+                                result,
+                                observation.camera_index,
+                                view.time.seconds() + 0.5 * duration_s,
+                                object,
+                            )?;
+                            Ok([end[0] - start[0], end[1] - start[1]])
+                        })
+                        .collect()
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_lines)]
+fn write_exposure_diagnostics(
+    config: &RunSettings,
+    result: &ContinuousTimeCalibrationResult,
+    views: &[TimedView<'_>],
+    detected_views: &[DetectedView],
+    run: &RunContext,
+) -> Result<()> {
+    let mut accumulators = (0..config.cameras.len())
+        .map(|_| CameraExposureAccumulator::default())
+        .collect::<Vec<_>>();
+    for residual in &result.residuals {
+        let accumulator = accumulators
+            .get_mut(residual.camera_index)
+            .context("exposure diagnostic camera index is out of range")?;
+        if !residual.used {
+            accumulator.rejected_points += 1;
+            continue;
+        }
+        accumulator.used_points += 1;
+        let detected_view = detected_views
+            .get(residual.view_index)
+            .context("exposure diagnostic detected view index is out of range")?;
+        let duration_s = detected_view
+            .frames
+            .iter()
+            .find(|frame| frame.camera_index == residual.camera_index)
+            .and_then(|frame| frame.exposure_duration_s);
+        let Some(duration_s) = duration_s else {
+            continue;
+        };
+        accumulator.minimum_duration_s = Some(
+            accumulator
+                .minimum_duration_s
+                .map_or(duration_s, |current| current.min(duration_s)),
+        );
+        accumulator.maximum_duration_s = Some(
+            accumulator
+                .maximum_duration_s
+                .map_or(duration_s, |current| current.max(duration_s)),
+        );
+        let view = views
+            .get(residual.view_index)
+            .context("exposure diagnostic view index is out of range")?;
+        let observation = view
+            .observations
+            .iter()
+            .find(|observation| observation.camera_index == residual.camera_index)
+            .context("exposure diagnostic observation is missing")?;
+        let object = observation
+            .points
+            .object_point(residual.point_index)
+            .context("exposure diagnostic object point is missing")?;
+        let observed = observation
+            .points
+            .pixels()
+            .get(residual.point_index)
+            .copied()
+            .context("exposure diagnostic image point is missing")?;
+        let midpoint_camera_s = view.time.seconds();
+        let predictions = [-0.5, 0.0, 0.5].map(|fraction| {
+            exposure_projection(
+                result,
+                residual.camera_index,
+                midpoint_camera_s + fraction * duration_s,
+                object,
+            )
+        });
+        let [Ok(start), Ok(midpoint), Ok(end)] = predictions else {
+            accumulator.unsupported_points += 1;
+            continue;
+        };
+        let reprojection = [midpoint[0] - observed[0], midpoint[1] - observed[1]];
+        let error = reprojection[0].hypot(reprojection[1]);
+        ensure!(
+            (error - residual.error_px).abs() <= 1.0e-6,
+            "exposure diagnostic midpoint projection disagrees with solved residual"
+        );
+        let motion = [end[0] - start[0], end[1] - start[1]];
+        let blur = motion[0].hypot(motion[1]);
+        let average = [
+            (start[0] + 4.0 * midpoint[0] + end[0]) / 6.0,
+            (start[1] + 4.0 * midpoint[1] + end[1]) / 6.0,
+        ];
+        let geometric_average_error = (average[0] - observed[0]).hypot(average[1] - observed[1]);
+        let bias = (average[0] - midpoint[0]).hypot(average[1] - midpoint[1]);
+        let bin = &mut accumulator.bins[exposure_bin(blur)];
+        bin.blur.push(blur);
+        bin.error.push(error);
+        bin.geometric_average_error.push(geometric_average_error);
+        bin.bias.push(bias);
+        if blur >= 0.25 {
+            let direction = [motion[0] / blur, motion[1] / blur];
+            let parallel = reprojection[0] * direction[0] + reprojection[1] * direction[1];
+            let perpendicular = -reprojection[0] * direction[1] + reprojection[1] * direction[0];
+            bin.parallel_sum += parallel;
+            bin.parallel_squared_sum += parallel * parallel;
+            bin.perpendicular_squared_sum += perpendicular * perpendicular;
+            accumulator.anisotropy_samples.push(AnisotropySample {
+                fold: usize::from(view.time.seconds().rem_euclid(10.0) >= 5.0),
+                motion_squared: blur * blur,
+                parallel_squared: parallel * parallel,
+                perpendicular_squared: perpendicular * perpendicular,
+            });
+            bin.directional_points += 1;
+        }
+    }
+
+    let labels = ["<0.25", "0.25-0.5", "0.5-1", "1-2", ">=2"];
+    let cameras = config
+        .cameras
+        .iter()
+        .enumerate()
+        .map(|(camera_index, camera)| {
+            let accumulator = &mut accumulators[camera_index];
+            let bins = accumulator
+                .bins
+                .iter_mut()
+                .zip(labels)
+                .filter_map(|(bin, label)| summarize_exposure_bin(label, bin))
+                .collect();
+            CameraExposureDiagnostics {
+                camera_index,
+                camera_id: camera.id.clone(),
+                timestamp_reference: camera.timing.timestamp_reference,
+                fixed_exposure_duration_s: camera.timing.fixed_exposure_duration_s,
+                exposure_metadata_topic: camera.timing.exposure_metadata_topic.clone(),
+                exposure_duration_s_range: accumulator
+                    .minimum_duration_s
+                    .zip(accumulator.maximum_duration_s)
+                    .map(|(minimum, maximum)| [minimum, maximum]),
+                status: if camera.timing.fixed_exposure_duration_s.is_some()
+                    || camera.timing.exposure_metadata_topic.is_some()
+                {
+                    "available"
+                } else {
+                    "unavailable_no_exposure_duration"
+                },
+                used_points: accumulator.used_points,
+                rejected_points: accumulator.rejected_points,
+                unsupported_points: accumulator.unsupported_points,
+                anisotropy_cross_validation: anisotropy_cross_validation(
+                    &accumulator.anisotropy_samples,
+                ),
+                bins,
+            }
+        })
+        .collect();
+    run.write_yaml(
+        Path::new("exposure_diagnostics.yaml"),
+        &ExposureDiagnostics {
+            schema_version: 1,
+            projection_model: "simpson_geometric_average_diagnostic_only",
+            cameras,
+        },
+    )
+}
+
+fn exposure_projection(
+    result: &ContinuousTimeCalibrationResult,
+    camera_index: usize,
+    camera_time_s: f64,
+    object: [f64; 3],
+) -> Result<[f64; 2]> {
+    let centered_time_s = camera_time_s - result.clock_reference_time_s;
+    let imu_time_s = camera_time_s
+        + result.time_offset_s
+        + result.camera_time_offsets_s[camera_index]
+        + centered_time_s
+            * (result.clock_skew_s_per_s + result.camera_clock_skews_s_per_s[camera_index]);
+    let sample = result
+        .trajectory
+        .evaluate(SampleTime::from_seconds(imu_time_s)?)?;
+    let camera_from_world =
+        result.camera_from_imu[camera_index].compose(&sample.world_from_imu.inverse()?)?;
+    ccl_calib::camera::project(
+        result.cameras[camera_index],
+        camera_from_world.rotation_vector(),
+        camera_from_world.translation(),
+        object,
+    )
+    .context("finite-exposure projection is outside the camera model domain")
+}
+
+fn exposure_bin(motion_px: f64) -> usize {
+    if motion_px < 0.25 {
+        0
+    } else if motion_px < 0.5 {
+        1
+    } else if motion_px < 1.0 {
+        2
+    } else if motion_px < 2.0 {
+        3
+    } else {
+        4
+    }
+}
+
+fn anisotropy_cross_validation(samples: &[AnisotropySample]) -> Option<AnisotropyCrossValidation> {
+    const LABELS: [&str; 2] = ["even 5 s blocks", "odd 5 s blocks"];
+    if samples.len() < 4 || (0..2).any(|fold| samples.iter().all(|sample| sample.fold != fold)) {
+        return None;
+    }
+    let folds = LABELS
+        .into_iter()
+        .enumerate()
+        .map(|(held_out_fold, label)| {
+            let training = samples
+                .iter()
+                .filter(|sample| sample.fold != held_out_fold)
+                .copied()
+                .collect::<Vec<_>>();
+            let held_out = samples
+                .iter()
+                .filter(|sample| sample.fold == held_out_fold)
+                .copied()
+                .collect::<Vec<_>>();
+            anisotropy_fold(label, &training, &held_out)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(AnisotropyCrossValidation {
+        temporal_block_s: 5.0,
+        eligible_points: samples.len(),
+        folds,
+    })
+}
+
+fn anisotropy_fold(
+    label: &'static str,
+    training: &[AnisotropySample],
+    held_out: &[AnisotropySample],
+) -> Option<AnisotropyFoldSummary> {
+    let training_count = count_as_f64(training.len());
+    let perpendicular_variance = training
+        .iter()
+        .map(|sample| sample.perpendicular_squared)
+        .sum::<f64>()
+        / training_count;
+    let isotropic_variance = training
+        .iter()
+        .map(|sample| sample.parallel_squared + sample.perpendicular_squared)
+        .sum::<f64>()
+        / (2.0 * training_count);
+    let numerator = training
+        .iter()
+        .map(|sample| sample.motion_squared * (sample.parallel_squared - perpendicular_variance))
+        .sum::<f64>();
+    let denominator = training
+        .iter()
+        .map(|sample| sample.motion_squared * sample.motion_squared)
+        .sum::<f64>();
+    let parallel_variance_per_motion_squared = (numerator / denominator).max(0.0);
+    if !perpendicular_variance.is_finite()
+        || perpendicular_variance <= 0.0
+        || !isotropic_variance.is_finite()
+        || isotropic_variance <= 0.0
+        || !parallel_variance_per_motion_squared.is_finite()
+    {
+        return None;
+    }
+    let held_out_count = count_as_f64(held_out.len());
+    let mut isotropic_nll = 0.0;
+    let mut anisotropic_nll = 0.0;
+    let mut volume_preserving_nll = 0.0;
+    let mut isotropic_squared_whitened = 0.0;
+    let mut anisotropic_squared_whitened = 0.0;
+    let mut volume_preserving_squared_whitened = 0.0;
+    for sample in held_out {
+        let parallel_variance =
+            perpendicular_variance + parallel_variance_per_motion_squared * sample.motion_squared;
+        let isotropic_mahalanobis =
+            (sample.parallel_squared + sample.perpendicular_squared) / isotropic_variance;
+        let anisotropic_mahalanobis = sample.parallel_squared / parallel_variance
+            + sample.perpendicular_squared / perpendicular_variance;
+        let variance_ratio = parallel_variance / perpendicular_variance;
+        let volume_preserving_parallel_variance = isotropic_variance * variance_ratio.sqrt();
+        let volume_preserving_perpendicular_variance = isotropic_variance / variance_ratio.sqrt();
+        let volume_preserving_mahalanobis = sample.parallel_squared
+            / volume_preserving_parallel_variance
+            + sample.perpendicular_squared / volume_preserving_perpendicular_variance;
+        isotropic_nll += 0.5 * (isotropic_mahalanobis + 2.0 * isotropic_variance.ln());
+        anisotropic_nll +=
+            0.5 * (anisotropic_mahalanobis + parallel_variance.ln() + perpendicular_variance.ln());
+        volume_preserving_nll +=
+            0.5 * (volume_preserving_mahalanobis + 2.0 * isotropic_variance.ln());
+        isotropic_squared_whitened += isotropic_mahalanobis;
+        anisotropic_squared_whitened += anisotropic_mahalanobis;
+        volume_preserving_squared_whitened += volume_preserving_mahalanobis;
+    }
+    let isotropic_mean_nll = isotropic_nll / held_out_count;
+    let anisotropic_mean_nll = anisotropic_nll / held_out_count;
+    let volume_preserving_mean_nll = volume_preserving_nll / held_out_count;
+    Some(AnisotropyFoldSummary {
+        held_out_blocks: label,
+        training_points: training.len(),
+        held_out_points: held_out.len(),
+        fitted_isotropic_sigma_px: isotropic_variance.sqrt(),
+        fitted_perpendicular_sigma_px: perpendicular_variance.sqrt(),
+        fitted_parallel_variance_per_motion_squared: parallel_variance_per_motion_squared,
+        held_out_isotropic_mean_nll: isotropic_mean_nll,
+        held_out_anisotropic_mean_nll: anisotropic_mean_nll,
+        held_out_mean_nll_delta: anisotropic_mean_nll - isotropic_mean_nll,
+        held_out_isotropic_whitened_rms: (isotropic_squared_whitened / (2.0 * held_out_count))
+            .sqrt(),
+        held_out_anisotropic_whitened_rms: (anisotropic_squared_whitened / (2.0 * held_out_count))
+            .sqrt(),
+        held_out_volume_preserving_mean_nll: volume_preserving_mean_nll,
+        held_out_volume_preserving_mean_nll_delta: volume_preserving_mean_nll - isotropic_mean_nll,
+        held_out_volume_preserving_whitened_rms: (volume_preserving_squared_whitened
+            / (2.0 * held_out_count))
+            .sqrt(),
+    })
+}
+
+fn summarize_exposure_bin(
+    label: &'static str,
+    bin: &mut ExposureBinAccumulator,
+) -> Option<ExposureBinSummary> {
+    let points = bin.error.len();
+    if points == 0 {
+        return None;
+    }
+    let point_count = count_as_f64(points);
+    let directional_count = count_as_f64(bin.directional_points);
+    Some(ExposureBinSummary {
+        predicted_motion_px: label,
+        points,
+        mean_predicted_motion_px: bin.blur.iter().sum::<f64>() / point_count,
+        p95_predicted_motion_px: p95(&mut bin.blur),
+        rms_reprojection_px: (bin.error.iter().map(|value| value * value).sum::<f64>()
+            / point_count)
+            .sqrt(),
+        p95_reprojection_px: p95(&mut bin.error),
+        rms_geometric_average_reprojection_px: (bin
+            .geometric_average_error
+            .iter()
+            .map(|value| value * value)
+            .sum::<f64>()
+            / point_count)
+            .sqrt(),
+        p95_geometric_average_reprojection_px: p95(&mut bin.geometric_average_error),
+        mean_squared_error_delta_px2: (bin
+            .geometric_average_error
+            .iter()
+            .map(|value| value * value)
+            .sum::<f64>()
+            - bin.error.iter().map(|value| value * value).sum::<f64>())
+            / point_count,
+        mean_geometric_midpoint_bias_px: bin.bias.iter().sum::<f64>() / point_count,
+        p95_geometric_midpoint_bias_px: p95(&mut bin.bias),
+        directional_points: bin.directional_points,
+        mean_parallel_residual_px: (bin.directional_points > 0)
+            .then_some(bin.parallel_sum / directional_count),
+        rms_parallel_residual_px: (bin.directional_points > 0)
+            .then_some((bin.parallel_squared_sum / directional_count).sqrt()),
+        rms_perpendicular_residual_px: (bin.directional_points > 0)
+            .then_some((bin.perpendicular_squared_sum / directional_count).sqrt()),
+    })
+}
+
+fn p95(values: &mut [f64]) -> f64 {
+    values.sort_by(f64::total_cmp);
+    let rank = (95 * values.len()).div_ceil(100).saturating_sub(1);
+    values[rank]
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn count_as_f64(value: usize) -> f64 {
+    value as f64
 }
 
 fn continuous_solver_config(
@@ -756,9 +1391,7 @@ fn continuous_solver_config(
     Ok(ContinuousTimeSolverConfig {
         solver: joint_solver(config),
         gyro_noise_covariance_rad2_s_hz: imu_config.noise.gyro_covariance_rad2_s_hz,
-        accelerometer_noise_covariance_m2_s4_hz: imu_config
-            .noise
-            .accelerometer_covariance_m2_s4_hz,
+        accelerometer_noise_covariance_m2_s4_hz: imu_config.noise.accelerometer_covariance_m2_s4_hz,
         gravity_magnitude_m_s2: imu_config.gravity_magnitude_m_s2,
         max_imu_gap_s: imu_config.integration.max_gap_s,
         max_imu_samples: imu_config.integration.max_samples,
@@ -806,6 +1439,10 @@ fn inertial_output(
             accelerometer_bias_m_s2: result.initial_bias.accelerometer_m_s2,
             gravity_world_m_s2: result.gravity_world_m_s2,
             time_offset_s: result.time_offset_s,
+            clock_reference_time_s: 0.0,
+            clock_skew_ppm: 0.0,
+            camera_time_offsets_s: Vec::new(),
+            camera_clock_skews_ppm: Vec::new(),
             axis_calibration: ImuAxisCalibrationOutput::default(),
         }),
     }
@@ -842,7 +1479,13 @@ fn continuous_time_output(
         mode: "multi_camera_imu".to_owned(),
         acceptance: AcceptanceStatus::PendingHumanReview,
         cameras,
-        reference_camera: None,
+        reference_camera: match &config.calibration {
+            CalibrationConfig::MultiCameraImu {
+                visual_reference_camera,
+                ..
+            } => Some(visual_reference_camera.clone()),
+            _ => None,
+        },
         camera_from_reference: Vec::new(),
         inertial: Some(InertialOutput {
             method: "continuous_time".to_owned(),
@@ -851,6 +1494,28 @@ fn continuous_time_output(
             accelerometer_bias_m_s2: result.bias.accelerometer_m_s2,
             gravity_world_m_s2: result.gravity_world_m_s2,
             time_offset_s: result.time_offset_s,
+            clock_reference_time_s: result.clock_reference_time_s,
+            clock_skew_ppm: result.clock_skew_s_per_s * 1.0e6,
+            camera_time_offsets_s: config
+                .cameras
+                .iter()
+                .zip(&result.camera_time_offsets_s)
+                .map(|(camera, &value_s)| CameraTimeOffsetOutput {
+                    id: camera.id.clone(),
+                    value_s,
+                })
+                .collect(),
+            camera_clock_skews_ppm: config
+                .cameras
+                .iter()
+                .zip(&result.camera_clock_skews_s_per_s)
+                .map(
+                    |(camera, &value_s_per_s)| crate::export::CameraClockSkewOutput {
+                        id: camera.id.clone(),
+                        value_ppm: value_s_per_s * 1.0e6,
+                    },
+                )
+                .collect(),
             axis_calibration: ImuAxisCalibrationOutput {
                 gyro_calibrated_from_raw: result.imu_calibration.gyro_calibrated_from_raw,
                 accelerometer_calibrated_from_raw: result
@@ -1069,6 +1734,38 @@ fn core_time_offset(config: TimeOffsetConfig, solved_initial_s: Option<f64>) -> 
     }
 }
 
+fn summed_time_offset_bounds(
+    global: TimeOffsetConfig,
+    camera: crate::config::CameraTimeOffsetsConfig,
+    drift_margin_s: f64,
+) -> TimeOffset {
+    let (initial_s, mut minimum_s, mut maximum_s, initialization_steps) = match global {
+        TimeOffsetConfig::Fixed { value_s } => (value_s, value_s, value_s, 2),
+        TimeOffsetConfig::Estimate {
+            initial_s,
+            minimum_s,
+            maximum_s,
+            initialization_steps,
+        } => (initial_s, minimum_s, maximum_s, initialization_steps),
+    };
+    if camera.refine {
+        minimum_s += camera.minimum_s;
+        maximum_s += camera.maximum_s;
+    }
+    minimum_s -= drift_margin_s;
+    maximum_s += drift_margin_s;
+    if minimum_s == maximum_s {
+        TimeOffset::Fixed(initial_s)
+    } else {
+        TimeOffset::Estimate {
+            initial_s,
+            minimum_s,
+            maximum_s,
+            initialization_steps,
+        }
+    }
+}
+
 fn isotropic_density(covariance: [[f64; 3]; 3], sensor: &str) -> Result<f64> {
     let variance = covariance[0][0];
     ensure!(
@@ -1088,7 +1785,11 @@ fn isotropic_density(covariance: [[f64; 3]; 3], sensor: &str) -> Result<f64> {
 fn joint_solver(config: &RunSettings) -> JointSolverConfig {
     JointSolverConfig {
         max_iterations: config.solver.max_iterations,
-        pixel_sigmas: config.cameras.iter().map(|camera| camera.pixel_sigma).collect(),
+        pixel_sigmas: config
+            .cameras
+            .iter()
+            .map(|camera| camera.pixel_sigma)
+            .collect(),
         huber_delta: config.solver.huber_delta,
         point_rejection_px: config.solver.point_rejection_px,
     }
@@ -1170,41 +1871,77 @@ fn rig_solve_summary(result: &CameraRigCalibrationResult, config: &RunSettings) 
         &result.convergence,
         &result.information,
         &result.camera_errors,
-        &config.cameras.iter().map(|camera| camera.pixel_sigma).collect::<Vec<_>>(),
+        &config
+            .cameras
+            .iter()
+            .map(|camera| camera.pixel_sigma)
+            .collect::<Vec<_>>(),
         None,
         None,
         None,
     )
 }
 
-fn inertial_solve_summary(result: &VisualInertialCalibrationResult, config: &RunSettings) -> SolveSummary {
+fn inertial_solve_summary(
+    result: &VisualInertialCalibrationResult,
+    config: &RunSettings,
+) -> SolveSummary {
     let inertial_whitened_rms = (!result.inertial_residuals.is_empty()).then(|| {
-        let squared = result.inertial_residuals.iter().map(|residual| residual.whitened_rms.powi(2)).sum::<f64>();
+        let squared = result
+            .inertial_residuals
+            .iter()
+            .map(|residual| residual.whitened_rms.powi(2))
+            .sum::<f64>();
         (squared / result.inertial_residuals.len() as f64).sqrt()
     });
     solve_summary(
         &result.convergence,
         &result.information,
         &result.camera_errors,
-        &config.cameras.iter().map(|camera| camera.pixel_sigma).collect::<Vec<_>>(),
+        &config
+            .cameras
+            .iter()
+            .map(|camera| camera.pixel_sigma)
+            .collect::<Vec<_>>(),
         None,
         None,
         inertial_whitened_rms,
     )
 }
 
-fn continuous_time_solve_summary(result: &ContinuousTimeCalibrationResult, config: &RunSettings) -> SolveSummary {
-    let rms = |values: &[f64]| (!values.is_empty()).then(|| {
-        (values.iter().map(|value| value * value).sum::<f64>() / values.len() as f64).sqrt()
-    });
-    let gyro = result.imu_residuals.iter().map(|residual| residual.gyro_whitened_rms).collect::<Vec<_>>();
-    let accel = result.imu_residuals.iter().map(|residual| residual.accelerometer_whitened_rms).collect::<Vec<_>>();
-    let combined = result.imu_residuals.iter().map(|residual| residual.whitened_rms).collect::<Vec<_>>();
+fn continuous_time_solve_summary(
+    result: &ContinuousTimeCalibrationResult,
+    config: &RunSettings,
+) -> SolveSummary {
+    let rms = |values: &[f64]| {
+        (!values.is_empty()).then(|| {
+            (values.iter().map(|value| value * value).sum::<f64>() / values.len() as f64).sqrt()
+        })
+    };
+    let gyro = result
+        .imu_residuals
+        .iter()
+        .map(|residual| residual.gyro_whitened_rms)
+        .collect::<Vec<_>>();
+    let accel = result
+        .imu_residuals
+        .iter()
+        .map(|residual| residual.accelerometer_whitened_rms)
+        .collect::<Vec<_>>();
+    let combined = result
+        .imu_residuals
+        .iter()
+        .map(|residual| residual.whitened_rms)
+        .collect::<Vec<_>>();
     solve_summary(
         &result.convergence,
         &result.information,
         &result.camera_errors,
-        &config.cameras.iter().map(|camera| camera.pixel_sigma).collect::<Vec<_>>(),
+        &config
+            .cameras
+            .iter()
+            .map(|camera| camera.pixel_sigma)
+            .collect::<Vec<_>>(),
         rms(&gyro),
         rms(&accel),
         rms(&combined),
@@ -1323,6 +2060,21 @@ fn log_continuous_time_diagnostics(
     run.log(
         "INFO",
         &format!(
+            "affine_clock reference_time_s={:.9} global_offset_s={:+.9} global_skew_ppm={:+.6} camera_offsets_s={:?} camera_skews_ppm={:?}",
+            result.clock_reference_time_s,
+            result.time_offset_s,
+            result.clock_skew_s_per_s * 1.0e6,
+            result.camera_time_offsets_s,
+            result
+                .camera_clock_skews_s_per_s
+                .iter()
+                .map(|value| value * 1.0e6)
+                .collect::<Vec<_>>()
+        ),
+    )?;
+    run.log(
+        "INFO",
+        &format!(
             "imu_axis_calibration gyro_calibrated_from_raw={:?} accelerometer_calibrated_from_raw={:?}",
             result.imu_calibration.gyro_calibrated_from_raw,
             result.imu_calibration.accelerometer_calibrated_from_raw
@@ -1364,4 +2116,32 @@ fn log_json<T: serde::Serialize>(run: &RunContext, label: &str, value: &T) -> Re
 
 fn elapsed_millis(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AnisotropySample, anisotropy_cross_validation};
+
+    #[test]
+    fn held_out_anisotropy_model_recovers_motion_dependent_parallel_variance() {
+        const MOTION_SQUARED: [f64; 10] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        let samples = (0..40)
+            .map(|index| {
+                let motion_squared = MOTION_SQUARED[index % MOTION_SQUARED.len()];
+                AnisotropySample {
+                    fold: index % 2,
+                    motion_squared,
+                    parallel_squared: 0.04 + 0.02 * motion_squared,
+                    perpendicular_squared: 0.04,
+                }
+            })
+            .collect::<Vec<_>>();
+        let validation = anisotropy_cross_validation(&samples).unwrap();
+        assert_eq!(validation.eligible_points, samples.len());
+        for fold in validation.folds {
+            assert!((fold.fitted_perpendicular_sigma_px - 0.2).abs() < 1.0e-12);
+            assert!((fold.fitted_parallel_variance_per_motion_squared - 0.02).abs() < 1.0e-12);
+            assert!(fold.held_out_anisotropic_mean_nll < fold.held_out_isotropic_mean_nll);
+        }
+    }
 }

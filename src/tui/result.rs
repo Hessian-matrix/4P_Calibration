@@ -226,6 +226,24 @@ impl ResultData {
                     inertial.gyro_bias_rad_s[1],
                     inertial.gyro_bias_rad_s[2]
                 ));
+                if inertial.camera_time_offsets_s.is_empty() {
+                    lines.push("逐相机残余时差: 不适用".to_owned());
+                } else {
+                    lines.push(format!(
+                        "逐相机残余时差（reference={}，固定 0）:",
+                        output.reference_camera.as_deref().unwrap_or("-")
+                    ));
+                    for offset in &inertial.camera_time_offsets_s {
+                        lines.push(format!("  {:<16} {:+.9} s", offset.id, offset.value_s));
+                    }
+                }
+                lines.push(format!(
+                    "全局时钟漂移: {:+.6} ppm（参考时刻 {:.9} s）",
+                    inertial.clock_skew_ppm, inertial.clock_reference_time_s
+                ));
+                for skew in &inertial.camera_clock_skews_ppm {
+                    lines.push(format!("  {:<16} {:+.6} ppm", skew.id, skew.value_ppm));
+                }
                 lines.push(format!(
                     "accelerometer bias [m/s²]: [{:.6}, {:.6}, {:.6}]",
                     inertial.accelerometer_bias_m_s2[0],

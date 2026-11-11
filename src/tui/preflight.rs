@@ -540,6 +540,29 @@ fn check_imu(draft: &Draft, settings: &RunSettings, checks: &mut Vec<PreflightCh
             imu.continuous_time.knot_interval_s
         ),
     ));
+    checks.push(ok(
+        "逐相机残余时差",
+        format!(
+            "{}；参考相机固定 0 s；共同范围 [{}, {}] s",
+            if imu.continuous_time.camera_time_offsets.refine {
+                "连续时间第二遍独立估计"
+            } else {
+                "固定为 0"
+            },
+            imu.continuous_time.camera_time_offsets.minimum_s,
+            imu.continuous_time.camera_time_offsets.maximum_s,
+        ),
+    ));
+    checks.push(ok(
+        "仿射时钟漂移（诊断）",
+        format!(
+            "global={}；per-camera={}；范围 [{}, {}] ppm；默认关闭，共享时间域固定为 0",
+            imu.continuous_time.clock_skews.refine_global,
+            imu.continuous_time.clock_skews.refine_cameras,
+            imu.continuous_time.clock_skews.minimum_ppm,
+            imu.continuous_time.clock_skews.maximum_ppm,
+        ),
+    ));
     let huber_px = settings.solver.huber_delta
         * settings.cameras.first().map_or(1.0, |camera| camera.pixel_sigma);
     checks.push(ok(
@@ -557,6 +580,15 @@ fn check_imu(draft: &Draft, settings: &RunSettings, checks: &mut Vec<PreflightCh
             ));
         } else {
             checks.push(ok("IMU 轴标定", "预积分使用单位轴矩阵，refine=false"));
+        }
+        if imu.continuous_time.camera_time_offsets.refine
+            || imu.continuous_time.clock_skews.refine_global
+            || imu.continuous_time.clock_skews.refine_cameras
+        {
+            checks.push(blocker(
+                "连续时间时钟参数",
+                "预积分不支持逐相机残余时差或仿射 clock skew；请关闭对应 refine",
+            ));
         }
     } else {
         checks.push(ok(

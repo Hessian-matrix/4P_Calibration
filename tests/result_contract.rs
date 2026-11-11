@@ -29,6 +29,10 @@ fn inertial(axis_calibration: ImuAxisCalibrationOutput) -> InertialOutput {
         accelerometer_bias_m_s2: [0.1, -0.2, 0.03],
         gravity_world_m_s2: [0.0, 0.0, 9.80665],
         time_offset_s: 0.002,
+        clock_reference_time_s: 0.0,
+        clock_skew_ppm: 0.0,
+        camera_time_offsets_s: Vec::new(),
+        camera_clock_skews_ppm: Vec::new(),
         axis_calibration,
     }
 }
@@ -161,4 +165,34 @@ fn invalid_exported_axis_matrices_are_rejected() {
                 .is_err()
         );
     }
+}
+
+#[test]
+fn schema_six_requires_all_camera_offsets_once_and_reference_zero() {
+    let mut inertial = inertial(ImuAxisCalibrationOutput::default());
+    inertial.camera_time_offsets_s = vec![four_p_calibration::export::CameraTimeOffsetOutput {
+        id: "cam0".to_owned(),
+        value_s: 0.0,
+    }];
+    output(6, Some(inertial.clone())).validate().unwrap();
+    inertial.camera_time_offsets_s[0].value_s = 0.001;
+    assert!(output(6, Some(inertial)).validate().is_err());
+}
+
+#[test]
+fn schema_seven_requires_all_camera_skews_once_and_reference_zero() {
+    let mut inertial = inertial(ImuAxisCalibrationOutput::default());
+    inertial.camera_time_offsets_s = vec![four_p_calibration::export::CameraTimeOffsetOutput {
+        id: "cam0".to_owned(),
+        value_s: 0.0,
+    }];
+    inertial.camera_clock_skews_ppm = vec![
+        four_p_calibration::export::CameraClockSkewOutput {
+            id: "cam0".to_owned(),
+            value_ppm: 0.0,
+        },
+    ];
+    output(7, Some(inertial.clone())).validate().unwrap();
+    inertial.camera_clock_skews_ppm[0].value_ppm = 1.0;
+    assert!(output(7, Some(inertial)).validate().is_err());
 }

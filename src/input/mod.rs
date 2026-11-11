@@ -9,12 +9,14 @@ use ccl_calib::camera::{CalibrationImageSize, SampleTime};
 use ccl_image::{Gray8View, detection};
 use ccl_rosbag::schema::Projection;
 use ccl_rosbag::{
-    CompiledSchema, ImageAdapter, MessageFilter, MessageSchema, OpenOptions, SchemaEncoding,
-    SchemaSource, StaticSchemaRegistry, TopicId, ValueRef, Visit,
+    BagReader, CompiledSchema, ImageAdapter, MessageFilter, MessageSchema, OpenOptions,
+    SchemaEncoding, SchemaSource, StaticSchemaRegistry, TopicId, ValueRef, Visit,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-use crate::config::{BagSourceConfig, CalibrationConfig, RunSettings};
+use crate::config::{
+    BagSourceConfig, CalibrationConfig, CameraConfig, CameraTimestampReference, RunSettings,
+};
 use crate::detection::{
     DetectedDataset, DetectedFrame, DetectedView, DetectionStats, DetectionSummary, FrameDetection,
     FrameDetector,
@@ -22,6 +24,7 @@ use crate::detection::{
 
 const RAW_IMAGE_TYPE: &str = "sensor_msgs/Image";
 const COMPRESSED_IMAGE_TYPE: &str = "sensor_msgs/CompressedImage";
+const STRING_TYPE: &str = "std_msgs/String";
 const IMU_TYPE: &str = "sensor_msgs/Imu";
 
 const ROS2_IMAGE_SCHEMA: &str = "std_msgs/Header header\nuint32 height\nuint32 width\nstring encoding\nuint8 is_bigendian\nuint32 step\nuint8[] data\nMSG: std_msgs/Header\nbuiltin_interfaces/Time stamp\nstring frame_id\nMSG: builtin_interfaces/Time\nint32 sec\nuint32 nanosec\n";
@@ -224,10 +227,24 @@ struct RawDetectedFrame {
     detected: Option<DetectedFrame>,
 }
 
+type TimestampedDetectedFrame = (i64, Option<Arc<DetectedFrame>>);
+type CameraDetectedFrames = Vec<TimestampedDetectedFrame>;
+
 struct RawImuSample {
     timestamp_ns: i64,
     gyro_rad_s: [f64; 3],
     specific_force_m_s2: [f64; 3],
+}
+
+#[derive(Deserialize)]
+struct FrameExposureMetadata {
+    camera_timestamp_ns: i64,
+    exposure: ExposureMetadata,
+}
+
+#[derive(Deserialize)]
+struct ExposureMetadata {
+    duration_ns: u64,
 }
 
 enum DetectionImage {
@@ -730,7 +747,7 @@ pub fn load_and_detect(
             if selected_index < settings.cameras.len() {
                 let camera_index = selected_index;
                 let context = format!(
-                    "{} at {}",
+                    "{} at header={}",
                     settings.cameras[camera_index].topic, timestamp_ns
                 );
                 let image = match &image_bindings[camera_index] {
@@ -814,7 +831,9 @@ pub fn load_and_detect(
     let anchor_camera = synchronization_anchor(settings)?;
     let anchor_frame_count = frames_by_camera[anchor_camera].len();
     let counts = frames_by_camera.iter().map(Vec::len).collect::<Vec<_>>();
-    let per_camera = detected_frames_by_camera(settings, &mut frames_by_camera)?;
+    let exposure_durations_ns = load_exposure_durations(settings, bag.as_ref())?;
+    let per_camera =
+        detected_frames_by_camera(settings, &mut frames_by_camera, &exposure_durations_ns)?;
     // One detector pass feeds both groupings: exact-time union views for the continuous-time
     // solve, and approximate shared views (on the anchor camera's timeline) for the visual rig
     // seed and the non-continuous-time modes.
@@ -932,24 +951,142 @@ fn synchronization_anchor(settings: &RunSettings) -> Result<usize> {
         .with_context(|| format!("unknown synchronization anchor camera {id}"))
 }
 
+fn load_exposure_durations(
+    settings: &RunSettings,
+    bag: &dyn BagReader,
+) -> Result<Vec<HashMap<i64, u64>>> {
+    let configured = settings
+        .cameras
+        .iter()
+        .enumerate()
+        .filter_map(|(camera_index, camera)| {
+            camera
+                .timing
+                .exposure_metadata_topic
+                .as_deref()
+                .map(|name| (camera_index, name))
+        })
+        .map(|(camera_index, name)| {
+            let topic = bag
+                .topics()
+                .iter()
+                .find(|topic| topic.name == name)
+                .with_context(|| format!("exposure metadata topic {name} is absent from bag"))?;
+            ensure!(
+                normalize_type(&topic.type_name) == STRING_TYPE,
+                "exposure metadata topic {name} is not std_msgs/String"
+            );
+            Ok((camera_index, topic))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut durations = (0..settings.cameras.len())
+        .map(|_| HashMap::new())
+        .collect::<Vec<HashMap<i64, u64>>>();
+    if configured.is_empty() {
+        return Ok(durations);
+    }
+    let schemas = configured
+        .iter()
+        .map(|(_, topic)| CompiledSchema::for_topic(topic, None))
+        .collect::<Result<Vec<_>, _>>()?;
+    let projections = schemas
+        .iter()
+        .map(|schema| schema.projection(&["data"]))
+        .collect::<Result<Vec<_>, _>>()?;
+    let bindings = configured
+        .iter()
+        .enumerate()
+        .map(|(binding, (camera_index, topic))| (topic.id, (binding, *camera_index)))
+        .collect::<HashMap<_, _>>();
+    let filter = MessageFilter {
+        topics: configured.iter().map(|(_, topic)| topic.id).collect(),
+        ..MessageFilter::default()
+    };
+    bag.visit(&filter, &mut |raw| {
+        let (binding, camera_index) = bindings[&raw.topic_id];
+        let message = schemas[binding].view(raw.payload)?;
+        message.project(&projections[binding], &mut |field| {
+            let ValueRef::String(json) = field.value else {
+                return Err(ccl_rosbag::BagError::InvalidPayload(
+                    "exposure metadata data field is not a string".to_owned(),
+                ));
+            };
+            let metadata: FrameExposureMetadata = serde_json::from_str(json).map_err(|error| {
+                ccl_rosbag::BagError::InvalidPayload(format!("invalid exposure metadata: {error}"))
+            })?;
+            if metadata.exposure.duration_ns == 0
+                || metadata.exposure.duration_ns > i64::MAX.cast_unsigned()
+            {
+                return Err(ccl_rosbag::BagError::InvalidPayload(
+                    "exposure duration must be positive and representable".to_owned(),
+                ));
+            }
+            if let Some(previous) = durations[camera_index]
+                .insert(metadata.camera_timestamp_ns, metadata.exposure.duration_ns)
+                && previous != metadata.exposure.duration_ns
+            {
+                return Err(ccl_rosbag::BagError::InvalidPayload(format!(
+                    "conflicting exposure durations at timestamp {}",
+                    metadata.camera_timestamp_ns
+                )));
+            }
+            Ok(())
+        })?;
+        Ok(Visit::Continue)
+    })?;
+    for (camera_index, topic) in configured {
+        ensure!(
+            !durations[camera_index].is_empty(),
+            "exposure metadata topic {} contains no usable messages",
+            topic.name
+        );
+    }
+    Ok(durations)
+}
+
 /// Preserve missing detections while matching source timestamps: a detector miss must
-/// not shift a camera to a different exposure. Duplicate timestamps are source errors.
+/// not shift a camera to a different exposure. Duplicate midpoint timestamps are errors.
 fn detected_frames_by_camera(
     settings: &RunSettings,
     frames_by_camera: &mut [Vec<RawDetectedFrame>],
-) -> Result<Vec<Vec<(i64, Option<Arc<DetectedFrame>>)>>> {
+    exposure_durations_ns: &[HashMap<i64, u64>],
+) -> Result<Vec<CameraDetectedFrames>> {
     frames_by_camera
         .iter_mut()
         .enumerate()
         .map(|(camera_index, frames)| {
+            let camera = &settings.cameras[camera_index];
+            for frame in frames.iter_mut() {
+                let duration_s = if camera.timing.exposure_metadata_topic.is_some() {
+                    let duration_ns = exposure_durations_ns[camera_index]
+                        .get(&frame.timestamp_ns)
+                        .copied()
+                        .with_context(|| {
+                            format!(
+                                "camera {} has no exposure metadata for header timestamp {} ns",
+                                camera.id, frame.timestamp_ns
+                            )
+                        })?;
+                    #[allow(clippy::cast_precision_loss)]
+                    let exposure_seconds = duration_ns as f64 * 1.0e-9;
+                    Some(exposure_seconds)
+                } else {
+                    camera.timing.fixed_exposure_duration_s
+                };
+                frame.timestamp_ns =
+                    camera_midpoint_timestamp_ns(camera, frame.timestamp_ns, duration_s)?;
+                if let Some(detected) = &mut frame.detected {
+                    detected.exposure_duration_s = duration_s;
+                }
+            }
             frames.sort_by_key(|frame| (frame.timestamp_ns, frame.ordinal));
             if let Some(pair) = frames
                 .windows(2)
                 .find(|pair| pair[0].timestamp_ns == pair[1].timestamp_ns)
             {
                 return Err(anyhow!(
-                    "camera {} has duplicate header timestamp {} ns",
-                    settings.cameras[camera_index].id,
+                    "camera {} has duplicate exposure-midpoint timestamp {} ns",
+                    camera.id,
                     pair[0].timestamp_ns
                 ));
             }
@@ -965,7 +1102,7 @@ fn detected_frames_by_camera(
 /// cameras that published at that instant. Async cameras therefore keep their own stamps;
 /// nothing is retimed to an anchor and no observed frame is dropped for being unmatched.
 fn exact_time_views(
-    frames_by_camera: &[Vec<(i64, Option<Arc<DetectedFrame>>)>],
+    frames_by_camera: &[CameraDetectedFrames],
 ) -> Vec<(i64, Vec<Arc<DetectedFrame>>)> {
     let mut by_timestamp: BTreeMap<i64, Vec<Arc<DetectedFrame>>> = BTreeMap::new();
     for frames in frames_by_camera {
@@ -983,12 +1120,12 @@ fn exact_time_views(
 }
 
 /// Approximate shared views anchored on `anchor_camera`'s own header times: for every anchor
-/// frame that has a usable AprilGrid observation, take the unique nearest frame of every other
+/// frame that has a usable `AprilGrid` observation, take the unique nearest frame of every other
 /// camera within `max_delta_ns`. An equal nearest distance is ambiguous and rejected rather
 /// than broken arbitrarily. One message belongs to at most one shared view. With `require_all`,
 /// a group missing any camera is dropped; without it, a partial group is kept.
 fn synchronized_views(
-    frames_by_camera: &[Vec<(i64, Option<Arc<DetectedFrame>>)>],
+    frames_by_camera: &[CameraDetectedFrames],
     anchor_camera: usize,
     max_delta_ns: i64,
     require_all: bool,
@@ -1029,8 +1166,7 @@ fn synchronized_views(
                     Some((_, best)) if best < delta => {}
                     Some((_, best)) if best == delta => {
                         return Err(anyhow!(
-                            "ambiguous nearest frame for camera {} at anchor timestamp {anchor_time} ns: two frames are {delta} ns away; adjust source.synchronization.max_delta_ns",
-                            camera_index
+                            "ambiguous nearest frame for camera {camera_index} at anchor timestamp {anchor_time} ns: two frames are {delta} ns away; adjust source.synchronization.max_delta_ns"
                         ));
                     }
                     _ => nearest = Some((candidate, delta)),
@@ -1106,6 +1242,25 @@ fn projected_bytes<'payload>(
     bytes.context("missing CompressedImage.data")
 }
 
+#[allow(clippy::cast_possible_truncation)]
+fn camera_midpoint_timestamp_ns(
+    camera: &CameraConfig,
+    header_timestamp_ns: i64,
+    exposure_duration_s: Option<f64>,
+) -> Result<i64> {
+    if matches!(
+        camera.timing.timestamp_reference,
+        CameraTimestampReference::ExposureMidpoint
+    ) {
+        return Ok(header_timestamp_ns);
+    }
+    let duration_s = exposure_duration_s.context("trigger timestamp requires exposure duration")?;
+    let half_duration_ns = (duration_s * 0.5 * 1.0e9).round() as i64;
+    header_timestamp_ns
+        .checked_add(half_duration_ns)
+        .with_context(|| format!("camera {} midpoint timestamp overflow", camera.id))
+}
+
 fn combine_timestamp(sec: i64, nanosec: u32) -> Option<i64> {
     sec.checked_mul(1_000_000_000)?
         .checked_add(i64::from(nanosec))
@@ -1116,6 +1271,7 @@ fn normalize_type(type_name: &str) -> &str {
         "sensor_msgs/msg/Image" => RAW_IMAGE_TYPE,
         "sensor_msgs/msg/CompressedImage" => COMPRESSED_IMAGE_TYPE,
         "sensor_msgs/msg/Imu" => IMU_TYPE,
+        "std_msgs/msg/String" => STRING_TYPE,
         _ => type_name,
     }
 }
@@ -1137,10 +1293,11 @@ mod tests {
             image_size: CalibrationImageSize::new(640, 480).unwrap(),
             target_indices: (0..4).collect(),
             pixels: vec![[0.0; 2]; 4],
+            exposure_duration_s: None,
         })
     }
 
-    fn timeline(entries: &[(i64, usize)]) -> Vec<(i64, Option<Arc<DetectedFrame>>)> {
+    fn timeline(entries: &[(i64, usize)]) -> CameraDetectedFrames {
         entries
             .iter()
             .map(|&(timestamp_ns, camera_index)| (timestamp_ns, Some(frame(camera_index))))
@@ -1154,7 +1311,7 @@ mod tests {
     #[test]
     fn forwards_every_detected_view_without_solver_side_thinning() {
         let groups = (0..100)
-            .map(|index| (i64::try_from(index).unwrap(), vec![frame(0)]))
+            .map(|index| (i64::from(index), vec![frame(0)]))
             .collect();
         let views = detected_views(groups);
         let timestamps = views
@@ -1250,5 +1407,72 @@ mod tests {
         ];
         let groups = synchronized_views(&frames, 0, 5, true).unwrap();
         assert_eq!(camera_indices(&groups[0].1), vec![0]);
+    }
+
+    #[test]
+    fn metadata_duration_is_attached_and_trigger_is_normalized_to_midpoint() {
+        let mut camera = timing_camera(CameraTimestampReference::Trigger);
+        camera.timing.fixed_exposure_duration_s = None;
+        camera.timing.exposure_metadata_topic = Some("/cam0/frame_metadata".to_owned());
+        let settings = RunSettings {
+            source: BagSourceConfig {
+                path: std::path::PathBuf::from("recording.bag"),
+                format: crate::config::BagFormatConfig::Ros1V2,
+                imu_topic: None,
+                synchronization: crate::config::SynchronizationConfig::default(),
+            },
+            cameras: vec![camera],
+            target: crate::config::TargetConfig::default(),
+            detector: crate::config::DetectorConfig::default(),
+            calibration: CalibrationConfig::SingleCamera {
+                camera: "cam0".to_owned(),
+                initial_intrinsics: crate::config::InitialIntrinsicsConfig::default(),
+            },
+            solver: crate::config::SolverConfig::default(),
+        };
+        let mut raw = vec![vec![RawDetectedFrame {
+            timestamp_ns: 1_000_000,
+            ordinal: 0,
+            detected: Some((*frame(0)).clone()),
+        }]];
+        let durations = vec![HashMap::from([(1_000_000, 8_000_000)])];
+        let normalized = detected_frames_by_camera(&settings, &mut raw, &durations).unwrap();
+        assert_eq!(normalized[0][0].0, 5_000_000);
+        assert_eq!(
+            normalized[0][0].1.as_ref().unwrap().exposure_duration_s,
+            Some(0.008)
+        );
+    }
+
+    fn timing_camera(timestamp_reference: CameraTimestampReference) -> CameraConfig {
+        CameraConfig {
+            id: "cam0".to_owned(),
+            topic: "/cam0/image".to_owned(),
+            model: crate::config::CameraModelConfig::PinholeNone,
+            pixel_sigma: 1.0,
+            timing: crate::config::CameraTimingConfig {
+                timestamp_reference,
+                fixed_exposure_duration_s: Some(0.01),
+                exposure_metadata_topic: None,
+            },
+        }
+    }
+
+    #[test]
+    fn exposure_midpoint_headers_are_not_shifted() {
+        let camera = timing_camera(CameraTimestampReference::ExposureMidpoint);
+        assert_eq!(
+            camera_midpoint_timestamp_ns(&camera, 123, Some(0.01)).unwrap(),
+            123
+        );
+    }
+
+    #[test]
+    fn trigger_headers_are_shifted_by_half_the_fixed_exposure() {
+        let camera = timing_camera(CameraTimestampReference::Trigger);
+        assert_eq!(
+            camera_midpoint_timestamp_ns(&camera, 123, Some(0.01)).unwrap(),
+            5_000_123
+        );
     }
 }

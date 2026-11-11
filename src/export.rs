@@ -13,15 +13,15 @@ use crate::run_record::{RunContext, atomic_write, read_yaml};
 use crate::runner::SolveSummary;
 use crate::trajectory::Trajectory;
 
-/// Version 5 defines KB4 as eight parameters without skew. Version 4 moved
-/// inertial bias into the calibrated physical frame and renamed axis matrices.
-pub const RESULT_SCHEMA_VERSION: u32 = 5;
+/// Version 7 adds affine global and per-camera clock-skew parameters. Versions 4-6 retain
+/// their existing IMU representation and remain readable.
+pub const RESULT_SCHEMA_VERSION: u32 = 7;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CalibrationOutput {
-    /// Version 5 removes KB4 skew. Inertial schemas before 4 are rejected;
-    /// legacy KB4 payloads containing alpha are rejected by the model decoder.
+    /// Version 7 adds affine clock drift. Version 6 adds per-camera residual timing.
+    /// Inertial schemas before 4 and legacy KB4 payloads containing alpha are rejected.
     pub schema_version: u32,
     pub mode: String,
     #[serde(default = "default_acceptance")]
@@ -119,6 +119,20 @@ pub struct PoseOutput {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct CameraTimeOffsetOutput {
+    pub id: String,
+    pub value_s: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CameraClockSkewOutput {
+    pub id: String,
+    pub value_ppm: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InertialOutput {
     #[serde(default = "default_inertial_method")]
     pub method: String,
@@ -130,7 +144,20 @@ pub struct InertialOutput {
     /// Constant bias in the calibrated physical measurement frame.
     pub accelerometer_bias_m_s2: [f64; 3],
     pub gravity_world_m_s2: [f64; 3],
+    /// Global camera-to-IMU offset at `clock_reference_time_s`.
     pub time_offset_s: f64,
+    /// Affine-clock center in local seconds from the run's time origin.
+    #[serde(default)]
+    pub clock_reference_time_s: f64,
+    /// Global camera-clock slope relative to the IMU clock.
+    #[serde(default)]
+    pub clock_skew_ppm: f64,
+    /// Per-camera residual timestamp offsets at the affine-clock center.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub camera_time_offsets_s: Vec<CameraTimeOffsetOutput>,
+    /// Per-camera residual slopes relative to the visual reference camera.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub camera_clock_skews_ppm: Vec<CameraClockSkewOutput>,
     #[serde(default)]
     pub axis_calibration: ImuAxisCalibrationOutput,
 }
@@ -325,6 +352,94 @@ impl CalibrationOutput {
                 "non-finite inertial result"
             );
             ensure!(inertial.time_offset_s.is_finite(), "non-finite time offset");
+            ensure!(
+                inertial.clock_reference_time_s.is_finite()
+                    && inertial.clock_skew_ppm.is_finite(),
+                "invalid affine clock result"
+            );
+            ensure!(
+                inertial
+                    .camera_time_offsets_s
+                    .iter()
+                    .all(|offset| !offset.id.is_empty() && offset.value_s.is_finite()),
+                "invalid camera time offset"
+            );
+            let offset_ids = inertial
+                .camera_time_offsets_s
+                .iter()
+                .map(|offset| offset.id.as_str())
+                .collect::<HashSet<_>>();
+            ensure!(
+                offset_ids.len() == inertial.camera_time_offsets_s.len(),
+                "duplicate camera time offset id"
+            );
+            ensure!(
+                inertial.camera_clock_skews_ppm.iter().all(|skew| {
+                    !skew.id.is_empty() && skew.value_ppm.is_finite()
+                }),
+                "invalid camera clock skew"
+            );
+            let skew_ids = inertial
+                .camera_clock_skews_ppm
+                .iter()
+                .map(|skew| skew.id.as_str())
+                .collect::<HashSet<_>>();
+            ensure!(
+                skew_ids.len() == inertial.camera_clock_skews_ppm.len(),
+                "duplicate camera clock skew id"
+            );
+            if self.schema_version >= 6 {
+                if inertial.method == "continuous_time" {
+                    ensure!(
+                        offset_ids == ids,
+                        "continuous-time camera offsets must contain every camera exactly once"
+                    );
+                    let reference = self.reference_camera.as_deref().context(
+                        "continuous-time result requires a visual reference camera",
+                    )?;
+                    let reference_offset = inertial
+                        .camera_time_offsets_s
+                        .iter()
+                        .find(|offset| offset.id == reference)
+                        .context("missing reference camera time offset")?;
+                    ensure!(
+                        reference_offset.value_s == 0.0,
+                        "reference camera time offset must be exactly zero"
+                    );
+                } else {
+                    ensure!(
+                        inertial.camera_time_offsets_s.is_empty(),
+                        "preintegration camera time offsets must be empty"
+                    );
+                }
+            }
+            if self.schema_version >= 7 {
+                if inertial.method == "continuous_time" {
+                    ensure!(
+                        skew_ids == ids,
+                        "continuous-time camera skews must contain every camera exactly once"
+                    );
+                    let reference = self.reference_camera.as_deref().context(
+                        "continuous-time result requires a visual reference camera",
+                    )?;
+                    let reference_skew = inertial
+                        .camera_clock_skews_ppm
+                        .iter()
+                        .find(|skew| skew.id == reference)
+                        .context("missing reference camera clock skew")?;
+                    ensure!(
+                        reference_skew.value_ppm == 0.0,
+                        "reference camera clock skew must be exactly zero"
+                    );
+                } else {
+                    ensure!(
+                        inertial.camera_clock_skews_ppm.is_empty()
+                            && inertial.clock_skew_ppm == 0.0
+                            && inertial.clock_reference_time_s == 0.0,
+                        "preintegration affine clock fields must be empty or zero"
+                    );
+                }
+            }
             inertial.axis_calibration.validate()?;
         }
         Ok(())

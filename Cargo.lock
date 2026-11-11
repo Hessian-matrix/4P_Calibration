@@ -215,9 +215,9 @@ dependencies = [
 
 [[package]]
 name = "ccl_calib"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+ssh://git@10.21.12.53:2222/corp/rd/camera_corelib.git"
-checksum = "e1cf86b9cdd789fae6f7b5a0cb7b1c8f1da873f53e5414fa69c0ca191b268c44"
+checksum = "d56e63bdc4210446c0a8ad86958d83c6851625866d334337e06425899618af69"
 dependencies = [
  "ccl_geometry",
  "ccl_image",
@@ -253,9 +253,9 @@ dependencies = [
 
 [[package]]
 name = "ccl_rosbag"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+ssh://git@10.21.12.53:2222/corp/rd/camera_corelib.git"
-checksum = "8855a890f2041db87968a4bdc431327599e6528a4db6a279ad935154bd026b1c"
+checksum = "738277828447e235f6ab66ead57bb6d6fbbb73b22860757f8ec6408d406c3485"
 dependencies = [
  "bzip2-rs",
  "ccl_calib",

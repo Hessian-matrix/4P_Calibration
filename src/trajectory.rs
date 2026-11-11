@@ -160,20 +160,24 @@ impl Trajectory {
         })
     }
 
-    /// Final continuous-time trajectory.
+    /// Final continuous-time nominal trajectory.
     ///
-    /// The final spline is sampled with [`SplineTrajectory::evaluate`] at
-    /// `t_imu = t_camera + time_offset_s`, the corelib convention used by the visual
-    /// factors. Samples are the actual observation times, never spline control knots.
+    /// The final spline is sampled on the header plus global affine-clock timeline. Per-camera
+    /// residual offset/skew parameters identify visual factors but do not retime this shared
+    /// exported trajectory. Samples are actual observation header times, never control knots.
     pub fn continuous(
         trajectory: &SplineTrajectory,
         views: &[TimedView<'_>],
         time_offset_s: f64,
+        clock_reference_time_s: f64,
+        clock_skew_s_per_s: f64,
         origin_ns: i64,
     ) -> Result<Self> {
         ensure!(
-            time_offset_s.is_finite(),
-            "continuous-time offset must be finite"
+            [time_offset_s, clock_reference_time_s, clock_skew_s_per_s]
+                .iter()
+                .all(|value| value.is_finite()),
+            "continuous-time affine clock parameters must be finite"
         );
         ensure!(
             !views.is_empty(),
@@ -184,7 +188,8 @@ impl Trajectory {
         for (index, view) in views.iter().enumerate() {
             let time_s = view.time.seconds();
             ensure_strictly_increasing(&mut previous_time_s, time_s, index)?;
-            let imu_time_s = time_s + time_offset_s;
+            let imu_time_s =
+                time_s + time_offset_s + clock_skew_s_per_s * (time_s - clock_reference_time_s);
             ensure!(
                 imu_time_s.is_finite(),
                 "observation {index} shifted time is not finite"
@@ -204,7 +209,7 @@ impl Trajectory {
             frame: WORLD_FRAME.to_owned(),
             body_frame: IMU_BODY.to_owned(),
             time_basis: format!(
-                "exact per-camera observation timestamps in seconds relative to time_origin_ns; each sample is the final continuous-time spline evaluated at t_imu = t_camera + time_offset_s, time_offset_s = {time_offset_s:+.9} s (corelib t_imu_eval = t_camera + delta_t). Samples are observation times, not control knots"
+                "exact observation header timestamps in seconds relative to time_origin_ns; each sample uses t_imu = header_stamp + {time_offset_s:+.9} + {clock_skew_s_per_s:+.12} * (header_stamp - {clock_reference_time_s:.9}). Per-camera residual affine terms are intentionally not applied to shared trajectory samples"
             ),
             time_origin_ns: origin_ns.to_string(),
             samples,
@@ -302,6 +307,7 @@ mod tests {
                 image_size: CalibrationImageSize::new(640, 480).unwrap(),
                 target_indices: Vec::new(),
                 pixels: Vec::new(),
+                exposure_duration_s: None,
             })],
         }
     }
@@ -381,7 +387,7 @@ mod tests {
     }
 
     #[test]
-    fn continuous_trajectory_evaluates_at_camera_time_plus_offset() {
+    fn continuous_trajectory_evaluates_at_affine_clock_time() {
         let start = SampleTime::from_seconds(0.0).unwrap();
         let knot_interval_s = 0.5;
         let velocity_m_s = 2.0;
@@ -401,13 +407,18 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let offset_s = 0.25;
-        let trajectory = Trajectory::continuous(&spline, &views, offset_s, -2_000_000_000).unwrap();
+        let reference_s = 0.5;
+        let skew = 100.0e-6;
+        let trajectory =
+            Trajectory::continuous(&spline, &views, offset_s, reference_s, skew, -2_000_000_000)
+                .unwrap();
         assert_eq!(trajectory.frame, "world");
         assert_eq!(trajectory.body_frame, "imu");
         assert_eq!(trajectory.time_origin_ns, "-2000000000");
         for (sample, camera_time_s) in trajectory.samples.iter().zip(times) {
             assert_eq!(sample.time_s, camera_time_s);
-            let expected = velocity_m_s * (camera_time_s + offset_s);
+            let imu_time_s = camera_time_s + offset_s + skew * (camera_time_s - reference_s);
+            let expected = velocity_m_s * imu_time_s;
             assert!((sample.position_m[0] - expected).abs() < 1.0e-12);
         }
     }

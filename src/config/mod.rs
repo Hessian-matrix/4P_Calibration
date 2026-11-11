@@ -75,6 +75,33 @@ pub struct CameraConfig {
     pub model: CameraModelConfig,
     /// Isotropic corner standard deviation for this camera, in pixels.
     pub pixel_sigma: f64,
+    /// Header timestamp semantics and optional fixed exposure duration.
+    #[serde(default)]
+    pub timing: CameraTimingConfig,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CameraTimestampReference {
+    /// The image header already names the centre of the exposure interval.
+    #[default]
+    ExposureMidpoint,
+    /// The image header names the exposure-start trigger. An exposure duration source is required.
+    Trigger,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CameraTimingConfig {
+    #[serde(default)]
+    pub timestamp_reference: CameraTimestampReference,
+    /// Fixed exposure duration used when no per-frame metadata topic is configured.
+    #[serde(default)]
+    pub fixed_exposure_duration_s: Option<f64>,
+    /// Optional `std_msgs/String` topic containing JSON `camera_timestamp_ns` and
+    /// `exposure.duration_ns` fields for each image header timestamp.
+    #[serde(default)]
+    pub exposure_metadata_topic: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -273,12 +300,76 @@ pub struct ImuConfig {
 pub struct ContinuousTimeConfig {
     /// Uniform quartic B-spline knot interval in seconds; defaults to 0.01 s.
     pub knot_interval_s: f64,
+    /// Residual per-camera timestamp offsets after exposure-center correction.
+    pub camera_time_offsets: CameraTimeOffsetsConfig,
+    /// Affine camera-clock drift relative to the IMU clock and visual reference camera.
+    pub clock_skews: ClockSkewsConfig,
+    /// Optional second solve using fixed exposure-motion-aligned visual covariance shapes.
+    pub visual_motion_anisotropy: VisualMotionAnisotropyConfig,
 }
 
 impl Default for ContinuousTimeConfig {
     fn default() -> Self {
         Self {
             knot_interval_s: 0.01,
+            camera_time_offsets: CameraTimeOffsetsConfig::default(),
+            clock_skews: ClockSkewsConfig::default(),
+            visual_motion_anisotropy: VisualMotionAnisotropyConfig::default(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct VisualMotionAnisotropyConfig {
+    pub enabled: bool,
+    /// Variance-ratio increment per squared projected exposure displacement, in px^-2.
+    pub variance_ratio_per_motion_squared: f64,
+}
+
+impl Default for VisualMotionAnisotropyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            variance_ratio_per_motion_squared: 0.015,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CameraTimeOffsetsConfig {
+    pub refine: bool,
+    pub minimum_s: f64,
+    pub maximum_s: f64,
+}
+
+impl Default for CameraTimeOffsetsConfig {
+    fn default() -> Self {
+        Self {
+            refine: false,
+            minimum_s: -0.005,
+            maximum_s: 0.005,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ClockSkewsConfig {
+    pub refine_global: bool,
+    pub refine_cameras: bool,
+    pub minimum_ppm: f64,
+    pub maximum_ppm: f64,
+}
+
+impl Default for ClockSkewsConfig {
+    fn default() -> Self {
+        Self {
+            refine_global: false,
+            refine_cameras: false,
+            minimum_ppm: -200.0,
+            maximum_ppm: 200.0,
         }
     }
 }
@@ -408,6 +499,7 @@ impl RunSettings {
         ensure!(!self.cameras.is_empty(), "select at least one image topic");
         let mut ids = HashSet::with_capacity(self.cameras.len());
         let mut topics = HashSet::with_capacity(self.cameras.len());
+        let mut exposure_metadata_topics = HashSet::with_capacity(self.cameras.len());
         for camera in &self.cameras {
             ensure!(!camera.id.trim().is_empty(), "camera id must not be empty");
             ensure!(
@@ -424,12 +516,53 @@ impl RunSettings {
                 "camera {} pixel_sigma must be positive and finite",
                 camera.id
             );
+            if let Some(duration_s) = camera.timing.fixed_exposure_duration_s {
+                ensure!(
+                    duration_s.is_finite() && duration_s > 0.0,
+                    "camera {} fixed_exposure_duration_s must be positive and finite",
+                    camera.id
+                );
+                ensure!(
+                    duration_s <= 9_223_372_036.0,
+                    "camera {} fixed_exposure_duration_s is too large",
+                    camera.id
+                );
+            }
+            if let Some(topic) = camera.timing.exposure_metadata_topic.as_deref() {
+                ensure!(
+                    !topic.trim().is_empty(),
+                    "camera {} exposure_metadata_topic must not be empty",
+                    camera.id
+                );
+                ensure!(
+                    camera.timing.fixed_exposure_duration_s.is_none(),
+                    "camera {} must select either fixed_exposure_duration_s or exposure_metadata_topic",
+                    camera.id
+                );
+                ensure!(
+                    exposure_metadata_topics.insert(topic),
+                    "duplicate exposure metadata topic {topic}"
+                );
+            }
+            ensure!(
+                !matches!(
+                    camera.timing.timestamp_reference,
+                    CameraTimestampReference::Trigger
+                ) || camera.timing.fixed_exposure_duration_s.is_some()
+                    || camera.timing.exposure_metadata_topic.is_some(),
+                "camera {} trigger timestamps require an exposure duration source",
+                camera.id
+            );
             ensure!(
                 topics.insert(camera.topic.as_str()),
                 "duplicate camera topic {}",
                 camera.topic
             );
         }
+        ensure!(
+            exposure_metadata_topics.is_disjoint(&topics),
+            "exposure metadata topics must differ from image topics"
+        );
         self.validate_target()?;
         self.validate_detector()?;
         self.validate_solver()?;
@@ -645,9 +778,45 @@ impl RunSettings {
                     "imu.axis_calibration is only used by continuous_time; preintegration requires identity matrices and refine=false"
                 );
                 ensure!(
+                    !matches!(*method, InertialMethod::Preintegration)
+                        || (!imu.continuous_time.camera_time_offsets.refine
+                            && !imu.continuous_time.clock_skews.refine_global
+                            && !imu.continuous_time.clock_skews.refine_cameras
+                            && !imu.continuous_time.visual_motion_anisotropy.enabled),
+                    "continuous-time camera offsets, clock skews, and visual motion anisotropy are not supported by preintegration"
+                );
+                let camera_offsets = imu.continuous_time.camera_time_offsets;
+                ensure!(
+                    camera_offsets.minimum_s.is_finite()
+                        && camera_offsets.maximum_s.is_finite()
+                        && camera_offsets.minimum_s < camera_offsets.maximum_s,
+                    "invalid IMU continuous_time.camera_time_offsets bounds"
+                );
+                let clock_skews = imu.continuous_time.clock_skews;
+                ensure!(
+                    clock_skews.minimum_ppm.is_finite()
+                        && clock_skews.maximum_ppm.is_finite()
+                        && clock_skews.minimum_ppm < clock_skews.maximum_ppm
+                        && clock_skews.minimum_ppm > -500_000.0
+                        && clock_skews.maximum_ppm < 500_000.0,
+                    "invalid IMU continuous_time.clock_skews bounds"
+                );
+                ensure!(
                     imu.continuous_time.knot_interval_s.is_finite()
                         && imu.continuous_time.knot_interval_s > 0.0,
                     "IMU continuous_time.knot_interval_s must be positive and finite"
+                );
+                ensure!(
+                    imu.continuous_time
+                        .visual_motion_anisotropy
+                        .variance_ratio_per_motion_squared
+                        .is_finite()
+                        && imu
+                            .continuous_time
+                            .visual_motion_anisotropy
+                            .variance_ratio_per_motion_squared
+                            > 0.0,
+                    "IMU continuous_time.visual_motion_anisotropy variance ratio must be positive and finite"
                 );
                 for value in [
                     imu.gravity_magnitude_m_s2,
@@ -677,30 +846,27 @@ impl RunSettings {
         Ok(())
     }
 
-fn validate_covariance(matrix: [[f64; 3]; 3], name: &str) -> Result<()> {
-    ensure!(
-        matrix.iter().flatten().all(|value| value.is_finite()),
-        "{name} must be finite"
-    );
-    ensure!(
-        (0..3).all(|row| (0..3).all(|column| {
-            (matrix[row][column] - matrix[column][row]).abs() <= 1.0e-12
-        })),
-        "{name} must be symmetric"
-    );
-    let leading_two = matrix[0][0] * matrix[1][1] - matrix[0][1] * matrix[1][0];
-    let determinant = matrix[0][0]
-        * (matrix[1][1] * matrix[2][2] - matrix[1][2] * matrix[2][1])
-        - matrix[0][1]
-            * (matrix[1][0] * matrix[2][2] - matrix[1][2] * matrix[2][0])
-        + matrix[0][2]
-            * (matrix[1][0] * matrix[2][1] - matrix[1][1] * matrix[2][0]);
-    ensure!(
-        matrix[0][0] > 0.0 && leading_two > 0.0 && determinant > 0.0,
-        "{name} must be positive definite"
-    );
-    Ok(())
-}
+    fn validate_covariance(matrix: [[f64; 3]; 3], name: &str) -> Result<()> {
+        ensure!(
+            matrix.iter().flatten().all(|value| value.is_finite()),
+            "{name} must be finite"
+        );
+        ensure!(
+            (0..3).all(|row| (0..3)
+                .all(|column| { (matrix[row][column] - matrix[column][row]).abs() <= 1.0e-12 })),
+            "{name} must be symmetric"
+        );
+        let leading_two = matrix[0][0] * matrix[1][1] - matrix[0][1] * matrix[1][0];
+        let determinant = matrix[0][0]
+            * (matrix[1][1] * matrix[2][2] - matrix[1][2] * matrix[2][1])
+            - matrix[0][1] * (matrix[1][0] * matrix[2][2] - matrix[1][2] * matrix[2][0])
+            + matrix[0][2] * (matrix[1][0] * matrix[2][1] - matrix[1][1] * matrix[2][0]);
+        ensure!(
+            matrix[0][0] > 0.0 && leading_two > 0.0 && determinant > 0.0,
+            "{name} must be positive definite"
+        );
+        Ok(())
+    }
 
     #[must_use]
     pub fn mode_name(&self) -> &'static str {

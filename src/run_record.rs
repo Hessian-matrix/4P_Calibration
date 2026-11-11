@@ -48,10 +48,10 @@ impl CorelibProvenance {
     const fn current() -> Self {
         Self {
             distribution: "corp_registry",
-            workspace_version: "ccl_calib=0.4.0,ccl_geometry=0.1.0,ccl_image=0.3.0,ccl_rosbag=0.3.0",
+            workspace_version: "ccl_calib=0.5.0,ccl_geometry=0.1.0,ccl_image=0.3.0,ccl_rosbag=0.4.0",
             git_commit: "registry_index",
-            target: "cargo_target",
-            rustc_release: "1.98.1",
+            target: "cargo_host",
+            rustc_release: "cargo_toolchain",
             artifact_sha256: "Cargo.lock",
             profile: "cargo_registry",
         }

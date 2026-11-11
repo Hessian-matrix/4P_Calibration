@@ -963,7 +963,25 @@ td.num { font-variant-numeric: tabular-nums; }
       tbody.append(tr);
     }
     row("方法", inertial.method === undefined ? "—" : String(inertial.method));
-    row("时间偏移 (s)", formatValue(inertial.time_offset_s, 8));
+    row("中心时刻全局偏移 (s)", formatValue(inertial.time_offset_s, 8));
+    row("仿射参考时刻 (s)", formatValue(inertial.clock_reference_time_s, 8));
+    row("全局时钟漂移 (ppm)", formatValue(inertial.clock_skew_ppm, 6));
+    var cameraOffsets = Array.isArray(inertial.camera_time_offsets_s)
+      ? inertial.camera_time_offsets_s : [];
+    var cameraSkews = Array.isArray(inertial.camera_clock_skews_ppm)
+      ? inertial.camera_clock_skews_ppm : [];
+    if (cameraOffsets.length || cameraSkews.length) {
+      row("残余时钟参考相机", state.calibration.reference_camera === undefined
+        ? "—" : String(state.calibration.reference_camera));
+      cameraOffsets.forEach(function(offset) {
+        row("相机 " + String(offset.id) + " 中心残余时差 (s)", formatValue(offset.value_s, 9));
+      });
+      cameraSkews.forEach(function(skew) {
+        row("相机 " + String(skew.id) + " 残余漂移 (ppm)", formatValue(skew.value_ppm, 6));
+      });
+    } else {
+      row("逐相机残余时钟参数", "不适用");
+    }
     if (finiteVector(inertial.gyro_bias_rad_s, 3)) {
       row("陀螺偏置 (rad/s)", vectorText(inertial.gyro_bias_rad_s, 8));
     } else {

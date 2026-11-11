@@ -28,6 +28,11 @@ cameras:
 #   pinhole-radtan5、pinhole-radtan8、pinhole-d12。
 # 更换模型时，文件内参初值必须同模型；不能直接重命名参数。
 # Image / CompressedImage 话题名取决于实际 bag，本配置使用压缩图像。
+# 每路可选 timing。timestamp_reference 为 exposure_midpoint（默认）或 trigger。
+# trigger 必须提供时长；midpoint 可不提供时长，但不生成有限曝光运动统计。
+# 时长来源二选一：fixed_exposure_duration_s（秒），或 std_msgs/String JSON topic：
+# exposure_metadata_topic: /camera0/frame_metadata
+# metadata JSON 必须含 camera_timestamp_ns 与 exposure.duration_ns。
 - id: cam0
   topic: /camera0/image/compressed
   model: double-sphere
@@ -137,6 +142,19 @@ calibration:
       # 四次 B 样条节点间隔（秒）；0.01 = 10 ms，不是图像/IMU 重采样周期。
       # 更小间隔增加轨迹自由度及计算量，不保证结果更好。
       knot_interval_s: 0.01
+      # exp 数据的图像时间戳已按真实曝光中点修正；这里估计剩余时钟对齐误差。
+      # 参考相机固定为 0；其余相机在共同 ±5 ms 边界内估计中心时刻截距。
+      camera_time_offsets:
+        refine: true
+        minimum_s: -0.005
+        maximum_s: 0.005
+      # 仿射 skew 仅保留为诊断选项；共享硬件时间域默认固定为 0 ppm。
+      # 仅在独立时钟及共同时间事件已证明线性漂移时，才按需开启 global 或 cameras。
+      clock_skews:
+        refine_global: false
+        refine_cameras: false
+        minimum_ppm: -200.0
+        maximum_ppm: 200.0
 solver:
   # LM 最大迭代预算；到达上限不等于数值收敛，须检查 solve.yaml 的诊断。
   max_iterations: 1000

@@ -437,6 +437,7 @@ pub fn stage_label(stage: &str) -> &str {
         "solve_refine_imu_axes" => "IMU 轴参数细化",
         "solve_refine_time_offset" => "相机-IMU 时间偏移细化",
         "solve_refine_imu_axes_time_offset" => "IMU 轴参数与时间偏移联合细化",
+        "solve_refine_continuous_time_parameters" => "连续时间时钟/轴参数联合细化",
         "export" => "导出结果",
         other => other,
     }

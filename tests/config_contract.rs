@@ -1,7 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use four_p_calibration::config::{CalibrationConfig, ImuAxisCalibrationConfig, RunSettings};
+use four_p_calibration::config::{
+    CalibrationConfig, CameraTimestampReference, ImuAxisCalibrationConfig, RunSettings,
+};
 use four_p_calibration::export::load_result;
 
 const IDENTITY: &str = "[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]";
@@ -110,6 +112,76 @@ fn unknown_fields_are_rejected() {
     assert!(RunSettings::load(&path).is_err());
 }
 
+#[test]
+fn camera_timing_defaults_to_unshifted_exposure_midpoint() {
+    let settings = RunSettings::load(Path::new("config/calibration.yaml")).unwrap();
+    for camera in settings.cameras {
+        assert_eq!(
+            camera.timing.timestamp_reference,
+            CameraTimestampReference::ExposureMidpoint
+        );
+        assert_eq!(camera.timing.fixed_exposure_duration_s, None);
+        assert_eq!(camera.timing.exposure_metadata_topic, None);
+    }
+}
+
+#[test]
+fn trigger_timestamps_require_a_positive_fixed_exposure_duration() {
+    let source = fs::read_to_string("config/calibration.yaml").unwrap();
+    let trigger_without_duration = source.replacen(
+        "  pixel_sigma: 1.0\n",
+        "  pixel_sigma: 1.0\n  timing:\n    timestamp_reference: trigger\n",
+        1,
+    );
+    let (_directory, path) =
+        write_settings("trigger-without-duration.yaml", &trigger_without_duration);
+    assert!(RunSettings::load(&path).is_err());
+
+    let trigger = source.replacen(
+        "  pixel_sigma: 1.0\n",
+        "  pixel_sigma: 1.0\n  timing:\n    timestamp_reference: trigger\n    fixed_exposure_duration_s: 0.01\n",
+        1,
+    );
+    let (directory, path) = write_settings("trigger.yaml", &trigger);
+    let settings = RunSettings::load(&path).unwrap();
+    assert_eq!(
+        settings.cameras[0].timing.timestamp_reference,
+        CameraTimestampReference::Trigger
+    );
+    assert_eq!(
+        settings.cameras[0].timing.fixed_exposure_duration_s,
+        Some(0.01)
+    );
+    let round_trip = directory.path().join("trigger-round-trip.yaml");
+    fs::write(&round_trip, serde_yaml::to_string(&settings).unwrap()).unwrap();
+    RunSettings::load(&round_trip).unwrap();
+}
+
+#[test]
+fn exposure_metadata_source_is_exclusive_with_fixed_duration() {
+    let source = fs::read_to_string("config/calibration.yaml").unwrap();
+    let metadata = source.replacen(
+        "  pixel_sigma: 1.0\n",
+        "  pixel_sigma: 1.0\n  timing:\n    timestamp_reference: exposure_midpoint\n    exposure_metadata_topic: /camera0/frame_metadata\n",
+        1,
+    );
+    let (_directory, path) = write_settings("metadata-timing.yaml", &metadata);
+    let settings = RunSettings::load(&path).unwrap();
+    assert_eq!(
+        settings.cameras[0]
+            .timing
+            .exposure_metadata_topic
+            .as_deref(),
+        Some("/camera0/frame_metadata")
+    );
+
+    let both = metadata.replace(
+        "    exposure_metadata_topic: /camera0/frame_metadata\n",
+        "    exposure_metadata_topic: /camera0/frame_metadata\n    fixed_exposure_duration_s: 0.01\n",
+    );
+    let (_directory, path) = write_settings("ambiguous-duration-source.yaml", &both);
+    assert!(RunSettings::load(&path).is_err());
+}
 fn visual_settings(refine_intrinsics: bool) -> RunSettings {
     let mut settings = RunSettings::load(Path::new("config/calibration.yaml")).unwrap();
     settings.source.imu_topic = None;
@@ -277,6 +349,107 @@ fn obsolete_axis_field_names_are_rejected() {
             "accepted obsolete axis field {new}"
         );
     }
+}
+
+#[test]
+fn camera_time_offset_defaults_are_fixed_at_five_milliseconds() {
+    let settings = load_inertial("camera-offset-defaults.yaml", "continuous_time", "").unwrap();
+    let CalibrationConfig::MultiCameraImu { imu, .. } = settings.calibration else {
+        panic!("expected multi-camera-IMU configuration");
+    };
+    let offsets = imu.continuous_time.camera_time_offsets;
+    assert!(!offsets.refine);
+    assert_eq!(offsets.minimum_s, -0.005);
+    assert_eq!(offsets.maximum_s, 0.005);
+}
+
+#[test]
+fn clock_skew_defaults_are_fixed_at_two_hundred_ppm() {
+    let settings = load_inertial("clock-skew-defaults.yaml", "continuous_time", "").unwrap();
+    let CalibrationConfig::MultiCameraImu { imu, .. } = settings.calibration else {
+        panic!("expected multi-camera-IMU configuration");
+    };
+    let skews = imu.continuous_time.clock_skews;
+    assert!(!skews.refine_global);
+    assert!(!skews.refine_cameras);
+    assert_eq!(skews.minimum_ppm, -200.0);
+    assert_eq!(skews.maximum_ppm, 200.0);
+}
+
+#[test]
+fn visual_motion_anisotropy_is_explicit_and_continuous_time_only() {
+    let default = load_inertial("anisotropy-default.yaml", "continuous_time", "").unwrap();
+    let CalibrationConfig::MultiCameraImu { imu, .. } = default.calibration else {
+        panic!("expected multi-camera-IMU configuration");
+    };
+    assert!(!imu.continuous_time.visual_motion_anisotropy.enabled);
+    assert_eq!(
+        imu.continuous_time
+            .visual_motion_anisotropy
+            .variance_ratio_per_motion_squared,
+        0.015
+    );
+
+    let block = "    continuous_time:\n      visual_motion_anisotropy:\n        enabled: true\n        variance_ratio_per_motion_squared: 0.015\n";
+    let source = inertial_source("continuous_time", "")
+        .replace("    integration:\n", &format!("{block}    integration:\n"));
+    let (_directory, path) = write_settings("anisotropy-enabled.yaml", &source);
+    assert!(RunSettings::load(&path).is_ok());
+
+    let source = inertial_source("preintegration", "")
+        .replace("    integration:\n", &format!("{block}    integration:\n"));
+    let (_directory, path) = write_settings("anisotropy-preintegration.yaml", &source);
+    assert!(RunSettings::load(&path).is_err());
+}
+
+#[test]
+fn committed_continuous_time_configs_keep_clock_skew_disabled() {
+    for path in [
+        "config/calibration.yaml",
+        "config/presets/baton-bag-ds-continuous-basalt.yaml",
+    ] {
+        let settings = RunSettings::load(Path::new(path)).unwrap();
+        let CalibrationConfig::MultiCameraImu { imu, .. } = settings.calibration else {
+            panic!("expected multi-camera-IMU configuration in {path}");
+        };
+        assert!(!imu.continuous_time.clock_skews.refine_global, "{path}");
+        assert!(!imu.continuous_time.clock_skews.refine_cameras, "{path}");
+    }
+}
+
+#[test]
+fn continuous_time_accepts_explicit_clock_skew_diagnostics() {
+    let source = inertial_source("continuous_time", "").replace(
+        "    integration:\n",
+        "    continuous_time:\n      clock_skews:\n        refine_global: true\n        refine_cameras: true\n        minimum_ppm: -200\n        maximum_ppm: 200\n    integration:\n",
+    );
+    let (_directory, path) = write_settings("continuous-time-clock-skew.yaml", &source);
+    let settings = RunSettings::load(&path).unwrap();
+    let CalibrationConfig::MultiCameraImu { imu, .. } = settings.calibration else {
+        panic!("expected multi-camera-IMU configuration");
+    };
+    assert!(imu.continuous_time.clock_skews.refine_global);
+    assert!(imu.continuous_time.clock_skews.refine_cameras);
+}
+
+#[test]
+fn preintegration_rejects_affine_clock_refinement() {
+    let source = inertial_source("preintegration", "").replace(
+        "    integration:\n",
+        "    continuous_time:\n      clock_skews:\n        refine_global: true\n        minimum_ppm: -200\n        maximum_ppm: 200\n    integration:\n",
+    );
+    let (_directory, path) = write_settings("preintegration-clock-skew.yaml", &source);
+    assert!(RunSettings::load(&path).is_err());
+}
+
+#[test]
+fn preintegration_rejects_camera_time_offset_refinement() {
+    let source = inertial_source("preintegration", "").replace(
+        "    integration:\n",
+        "    continuous_time:\n      camera_time_offsets:\n        refine: true\n        minimum_s: -0.005\n        maximum_s: 0.005\n    integration:\n",
+    );
+    let (_directory, path) = write_settings("preintegration-camera-offset.yaml", &source);
+    assert!(RunSettings::load(&path).is_err());
 }
 
 fn with_solver(source: &str, solver: &str) -> String {

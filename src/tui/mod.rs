@@ -939,6 +939,14 @@ impl App {
             FieldId::ImuMaxGap => self.draft.imu.max_gap_s.clone(),
             FieldId::ImuMaxSamples => self.draft.imu.max_samples.clone(),
             FieldId::ImuKnotInterval => self.draft.imu.knot_interval_s.clone(),
+            FieldId::ImuCameraTimeOffsetMinimum => {
+                self.draft.imu.camera_time_offset_minimum_s.clone()
+            }
+            FieldId::ImuCameraTimeOffsetMaximum => {
+                self.draft.imu.camera_time_offset_maximum_s.clone()
+            }
+            FieldId::ImuClockSkewMinimum => self.draft.imu.clock_skew_minimum_ppm.clone(),
+            FieldId::ImuClockSkewMaximum => self.draft.imu.clock_skew_maximum_ppm.clone(),
             FieldId::ImuGyroMatrix => self.draft.imu.gyro_calibrated_from_raw.clone(),
             FieldId::ImuAccelMatrix => self.draft.imu.accelerometer_calibrated_from_raw.clone(),
             _ => String::new(),
@@ -1005,6 +1013,18 @@ impl App {
             FieldId::ImuMaxGap => self.draft.imu.max_gap_s = trimmed,
             FieldId::ImuMaxSamples => self.draft.imu.max_samples = trimmed,
             FieldId::ImuKnotInterval => self.draft.imu.knot_interval_s = trimmed,
+            FieldId::ImuCameraTimeOffsetMinimum => {
+                self.draft.imu.camera_time_offset_minimum_s = trimmed;
+            }
+            FieldId::ImuCameraTimeOffsetMaximum => {
+                self.draft.imu.camera_time_offset_maximum_s = trimmed;
+            }
+            FieldId::ImuClockSkewMinimum => {
+                self.draft.imu.clock_skew_minimum_ppm = trimmed;
+            }
+            FieldId::ImuClockSkewMaximum => {
+                self.draft.imu.clock_skew_maximum_ppm = trimmed;
+            }
             FieldId::ImuGyroMatrix => {
                 text.clone_into(&mut self.draft.imu.gyro_calibrated_from_raw);
             }
@@ -1229,6 +1249,21 @@ impl App {
             }
             FieldId::ImuRefineAxes => {
                 self.draft.imu.refine_axes = !self.draft.imu.refine_axes;
+                self.draft.touch();
+            }
+            FieldId::ImuRefineCameraTimeOffsets => {
+                self.draft.imu.refine_camera_time_offsets =
+                    !self.draft.imu.refine_camera_time_offsets;
+                self.draft.touch();
+            }
+            FieldId::ImuRefineGlobalClockSkew => {
+                self.draft.imu.refine_global_clock_skew =
+                    !self.draft.imu.refine_global_clock_skew;
+                self.draft.touch();
+            }
+            FieldId::ImuRefineCameraClockSkews => {
+                self.draft.imu.refine_camera_clock_skews =
+                    !self.draft.imu.refine_camera_clock_skews;
                 self.draft.touch();
             }
             FieldId::CameraToggle(topic) => {

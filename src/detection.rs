@@ -14,6 +14,7 @@ pub struct DetectedFrame {
     pub image_size: CalibrationImageSize,
     pub target_indices: Vec<usize>,
     pub pixels: Vec<[f64; 2]>,
+    pub exposure_duration_s: Option<f64>,
 }
 
 /// One image observation set. `timestamp_ns` is the view's timeline anchor: exact-time union
@@ -126,6 +127,7 @@ impl FrameDetector {
                 image_size,
                 target_indices,
                 pixels: image_points,
+                exposure_duration_s: None,
             }),
             accepted_tags,
             points,

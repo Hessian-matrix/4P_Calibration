@@ -69,6 +69,16 @@ calibration:
       refine: true
     continuous_time:
       knot_interval_s: 0.01
+      camera_time_offsets:
+        refine: true
+        minimum_s: -0.005
+        maximum_s: 0.005
+      # Shared timestamp domains keep affine skew fixed; enable only for clock diagnostics.
+      clock_skews:
+        refine_global: false
+        refine_cameras: false
+        minimum_ppm: -200.0
+        maximum_ppm: 200.0
 solver:
   max_iterations: 1000
   # Whitened Huber transition; each camera uses pixel_sigma * huber_delta = 4 px.

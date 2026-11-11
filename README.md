@@ -6,6 +6,8 @@
 
 `camera_corelib` 的各 crate 作为独立 `.crate` 发布在内部 GitLab `corp` Cargo registry。4P 固定依赖 `ccl_image`、`ccl_calib`、`ccl_geometry` 和 `ccl_rosbag` 的精确版本，由 Cargo 在统一依赖图中编译；不再分发或注入预编译 `.rlib`。
 
+当前精确版本为 `ccl_calib =0.5.0`、`ccl_rosbag =0.4.0`、`ccl_geometry =0.1.0`、`ccl_image =0.3.0`，均来自 `corp` registry，不依赖相邻 `camera_corelib` 源码目录。`ccl_calib 0.5.0` 提供当前使用的仿射相机时钟与运动方向视觉权重 API；同步提交 `Cargo.lock`，使用 `cargo build --locked --all-targets` 验证固定依赖构建。
+
 ## 构建与运行
 
 配置 `corp` registry 凭据后使用标准 Cargo 入口：
@@ -29,6 +31,7 @@ TUI 交互：
 - 启动检查区分阻断、警告和未检查项；只有无阻断项时可启动。一次点击即开始运行，不再二次确认启动。
 - 相机-IMU 模式可在配置页直接选择“预积分”或“连续时间 B 样条”。连续时间模式由视觉 rig、受 IMU 支持的最近陀螺样本旋转对齐及最早受支持种子时刻的比力和位姿建立初值；参考相机 shared-view 位姿与逐相机精确曝光时刻的 PnP 位姿按同一 rig 坐标系合并，按选定间隔拟合为四次样条。平移使用带状基函数求解，旋转使用局部 SO(3) 修正，避免仅用参考相机跨观测空档插值及全局旋转对数跳变造成投影越域。不调用预积分求解；随后固定视觉阶段内参，运行原始 IMU 与图像共同约束的批量优化。拟合初值不是联合标定结果。初始化、输入域或线性分解等无法形成候选的错误仍显式失败；达到 LM 迭代/阻尼边界或信息矩阵降秩不自动否决，最后接受的候选照常导出并等待人工验收。
 - `imu.axis_calibration.refine: true` 显式开启第二次连续时间精化，使用 Basalt 的 21 参数静态 IMU 模型：完整 gyro 3×3（9 参数）、正对角下三角 accelerometer（6 参数）及各 3 维常量 bias。约定为 `physical = A × raw − bias`；仅加速度计三角结构固定共同旋转规范，gyro 保留相对加速度计的旋转失准。矩阵使用加性参数化，非法候选拒绝；默认不精化。预积分不支持轴内参，配置非单位矩阵或开启精化会明确报错。
+- `imu.continuous_time.visual_motion_anisotropy.enabled: true` 可在各向同性连续时间解之后增加一次固定权重精化。应用由上一接受解预测每个角点跨曝光区间的像面位移；corelib 按该方向使用 `parallel/perpendicular = 1 + coefficient × motion_px²` 的协方差形状，并保持二维协方差行列式不变，避免通过整体放宽视觉权重获得伪收益。权重在该次 LM 内固定，因此解析 Jacobian 与被优化目标一致。默认关闭；必须为每帧提供曝光时长。
 - 时间偏移、IMU 噪声、轴参数和求解设置通过表单编辑；高级 YAML 编辑器位于启动检查页。`Ctrl-S` 应用并校验，非法内容保留且不覆盖配置，放弃未应用修改需要确认。
 - 表单、导航和动作支持鼠标。运行和结果页 `Tab` / `Shift-Tab` 切换只读视图，方向键与翻页键滚动；`Esc` 关闭弹窗或返回，不直接取消或退出。
 - 标定运行页持续显示总耗时、当前阶段/活动耗时、最近回调距今时间及最近已完成迭代耗时；扫描检测阶段按总帧数和平均速度估算剩余时间。非线性求解剩余时间显示“未知”，不把迭代上限当完成目标；结束后耗时冻结
@@ -78,13 +81,22 @@ calibration:
   imu:
     continuous_time:
       knot_interval_s: 0.01
+      camera_time_offsets:
+        refine: true
+        minimum_s: -0.005
+        maximum_s: 0.005
+      clock_skews:
+        refine_global: false
+        refine_cameras: false
+        minimum_ppm: -200.0
+        maximum_ppm: 200.0
     axis_calibration:
       refine: true
       gyro_calibrated_from_raw: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
       accelerometer_calibrated_from_raw: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
 ```
 
-连续时间严格按“视觉/陀螺直接初始化 → 固定时差与轴矩阵的连续时间基线 → 按配置释放时差和/或 IMU 轴误差的第二次精化”执行；两次连续时间求解均固定视觉阶段内参。`refine: true` 释放 15 个矩阵参数，`time_offset.type: estimate` 释放时差参数，二者均未开启时不运行第二次精化。结果 `schema_version: 5` 在顶层记录人工验收状态，`inertial.axis_calibration` 保存上述两块校正矩阵，bias 位于校正后的物理坐标系；TUI 结果页直接显示完整 YAML。
+连续时间严格按“视觉/陀螺直接初始化 → 固定时钟参数与轴矩阵的连续时间基线 → 按配置释放全局/逐相机时钟参数和/或 IMU 轴误差的第二次精化”执行；两次求解均固定视觉阶段内参。每路 `cameras[].timing.timestamp_reference` 显式声明图像 `header.stamp` 是 `exposure_midpoint`（默认）还是曝光开始 `trigger`。trigger 必须同时配置 `fixed_exposure_duration_s` 或 `exposure_metadata_topic`，读取后先转换为 `midpoint = trigger + duration/2`；midpoint 不平移。固定时长与 metadata topic 二选一。metadata topic 必须是 `std_msgs/String`，JSON 至少含与图像 header 相同的 `camera_timestamp_ns` 和正数 `exposure.duration_ns`；缺帧 metadata 显式失败。配置了任一时长来源时，连续时间求解后生成 `exposure_diagnostics.yaml`：按实际逐帧时长计算曝光首/中/末投影、曝光运动分桶、方向性残差和 Simpson 几何平均相对 midpoint 的偏差；该文件当前只诊断，不自动改变 LM 视觉残差或权重。未配置时长的 midpoint 数据仍可标定，但明确没有有限曝光诊断。共享硬件时间域默认将 global/per-camera skew 固定为 0，只估计残余固定 offset；仿射 skew 实现保留为显式诊断选项，仅适用于独立时钟且已有共同时间事件证明线性漂移的情况。启用时模型以观测区间中点 `t0` 为参考：`t_imu = midpoint + global_offset + global_skew*(midpoint-t0) + camera_offset[camera] + camera_skew[camera]*(midpoint-t0)`。视觉参考相机的逐相机 offset/skew 固定为 0；斜率配置和输出使用 ppm，core 内部使用 s/s。不能把 cost 的微小下降或曝光时长相关趋势单独解释成物理 clock skew。不添加每帧自由时差、同步先验或结果钳位。`schema_version: 7` 输出 `clock_reference_time_s`、`clock_skew_ppm`、`camera_time_offsets_s` 和 `camera_clock_skews_ppm`；schema 4–6 仍可读取。预积分不支持 affine clock 精化。轨迹按全局 affine 时间线导出，不应用逐相机残余项。
 
 所有联合优化入口统一使用 corelib 的 Basalt LM；旧 `Scaled` 策略及运行时选择器已删除。后端对未缩放正规矩阵使用历史最大对角阻尼，增益比按实际可行步的 `-gᵀs − ½sᵀHs` 计算；时差触界只限制该坐标，其他参数继续优化。仅投影 KKT 梯度达标才记为 `Converged(Gradient)`；反复小接受步、阻尼或迭代上限分别记为 `Stopped(Stagnation/DampingLimit/IterationLimit)`，不冒充收敛。信息矩阵取最终状态的未加阻尼、未屏蔽边界原系统；不添加固定姿态或平滑先验来消除秩亏。
 
@@ -111,7 +123,7 @@ calibration:
 - `sensor_msgs/CompressedImage`：PNG/JPEG/PNM
 - `sensor_msgs/Imu`
 
-图像读取使用有界队列交给按逻辑 CPU 数启动的检测 worker；队列只保留少量待处理图像，不会把整包图像载入内存。连续时间残差保留每路图像自己的 `header.stamp`，不同时间不合并、不因其他相机缺帧丢弃。视觉 rig、预积分及连续时间初始化另用参考相机时轴上的近同步 shared views；配对先按原始曝光时间选唯一最近帧，再取其检测结果，检测失败不改配邻帧。`require_all_cameras` 要求组内各路原始曝光存在，不要求各路同时看到标定板。连续时间在初始化前按完整时差范围固定裁剪 exact/seed 两组相机观测：`[first_imu − minimum_offset, last_imu − maximum_offset]`；固定时差时两端使用同一个 offset。外围 IMU 全保留，内部大 gap 整体拒绝，求解中不随时差试步改变因子集合。样条从首 IMU 样本起覆盖整段 IMU，末端按结间隔向上取整；浮点整数边界不人为多加一段。联合标定不设置 `max_views`、总角点数或参数数量的人为上限，实际规模仅受可用内存与计算时间约束。记录时间只用于 topic 统计，不冒充传感器采样时间。
+图像读取使用有界队列交给按逻辑 CPU 数启动的检测 worker；队列只保留少量待处理图像，不会把整包图像载入内存。若配置逐帧曝光 metadata，输入层先单独扫描小型字符串 topic，再解码图像；不会缓存图像 payload。所有下游分组和连续时间残差统一使用归一化后的曝光中点。不同时间不合并、不因其他相机缺帧丢弃。视觉 rig、预积分及连续时间初始化另用参考相机时轴上的近同步 shared views；配对按曝光中点选唯一最近帧，再取其检测结果，检测失败不改配邻帧。`require_all_cameras` 要求组内各路原始曝光存在，不要求各路同时看到标定板。连续时间在初始化前按完整时差范围固定裁剪 exact/seed 两组相机观测：`[first_imu − minimum_offset, last_imu − maximum_offset]`；固定时差时两端使用同一个 offset。外围 IMU 全保留，内部大 gap 整体拒绝，求解中不随时差试步改变因子集合。样条从首 IMU 样本起覆盖整段 IMU，末端按结间隔向上取整；浮点整数边界不人为多加一段。联合标定不设置 `max_views`、总角点数或参数数量的人为上限，实际规模仅受可用内存与计算时间约束。记录时间只用于 topic 统计，不冒充传感器采样时间。
 
 连续时间自动内参和视觉初始化只使用裁剪后的观测；corelib 两个入口再次校验相机时间支持，越界返回 `ImuCoverage`。gyro 使用保留种子的相邻位姿对，重力使用最早保留时刻的位姿和比力。样条除参考相机 shared-view 位姿外，还使用逐相机精确曝光时刻的固定内参 PnP，经同一 rig 外参转入参考坐标系，避免参考相机失去标定板时跨长空档插值；完全相同时间优先使用联合 rig 位姿。PnP 失败显式返回，不静默跳过。
 
@@ -125,14 +137,17 @@ calibration:
 - `run.log`：检测与求解诊断
 - `detection_progress.jsonl`：逐帧时间戳、相机、tag/角点数量、动态/平均 `frames/s` 与 worker 数，检测期间每 250 ms 刷盘
 - `detection.yaml`：完整检测汇总与各相机有效帧、tag、角点数量
-- `time_support.yaml`：连续时间固定支持区间、时间原点、完整 IMU 样本数及逐相机裁剪/保留帧数与点数；`detection.yaml` 仍记录裁剪前检测总数
-- `solve.yaml`：候选求解的停止原因、是否数值收敛、最终阻尼/梯度、信息秩/参数数、条件数、协方差是否为伪逆、逐相机重投影误差与剔除统计
+- `time_support.yaml`：连续时间固定支持区间、仿射时钟参考时刻/搜索边界、时间原点、完整 IMU 样本数及逐相机裁剪/保留帧数与点数；`detection.yaml` 仍记录裁剪前检测总数
+- `solve.yaml`：候选求解的停止原因、是否数值收敛、最终阻尼/梯度、信息秩/参数数、条件数、协方差是否为伪逆、时钟 offset/skew 标准差、逐相机重投影误差与剔除统计
+- `exposure_diagnostics.yaml`：连续时间且有曝光时长时，逐相机记录实际时长范围，并按预测曝光运动 `<0.25/0.25–0.5/0.5–1/1–2/≥2 px` 输出瞬时 midpoint 与 Simpson 几何平均投影各自的重投影 RMS/P95、两者均方误差差、沿/垂直运动方向 RMS、平行方向均值及几何平均相对 midpoint 的偏差；无时长时状态为 unavailable。该文件只做求解后诊断，不把几何平均投影写回残差或参数。
 - `report.txt`：TUI 完成/失败摘要、完整错误链、诊断建议和产物清单
 - `result/calibration.yaml`：形成有限候选时生成的标定参数，顶层 `acceptance` 默认为 `pending_human_review`；应用不代替人工验收
-- `result/extrinsics_3d.html`：与 YAML 一起原子发布的离线结果查看器，内嵌参数、指标和轨迹，无需联网。默认展示最终求解轨迹，支持时间拖动、1× 播放/暂停、静态构型切换、旋转/缩放/平移和视图适配。右栏展示位姿 R/t、wxyz 四元数、相机内参、逐相机 RMS/P95 与使用/剔除点数、收敛/信息矩阵诊断，以及 IMU 偏置、重力、时间偏移和轴矩阵。无 IMU 时明确显示不适用。轨迹模式叠加实际标定板：页面数据 `D.board` 由运行快照 `config.yaml` 经 `camera_corelib` 的 `TargetGeometry::april_grid` 生成，不维护第二套板几何约定。
-- `result/trajectory.json`：最终求解位姿，`T_frame_from_body`，平移单位 m、旋转矩阵行主序。单相机/纯视觉轨迹为参考相机相对标定板的运动；相机–IMU 为 IMU 在求解世界系的运动，不做额外重力对齐。`time_origin_ns` 用十进制字符串保存，`time_s` 为相机曝光时间相对该原点的秒数。预积分使用最终状态；连续时间在 `t_imu = t_camera + time_offset_s` 处求值最终样条，不把控制节点当作轨迹。仅含参与求解的观测时刻，不是完整数据集的独立定位结果。
+- `result/extrinsics_3d.html`：与 YAML 一起原子发布的离线结果查看器，右栏展示中心时刻 offset、全局/逐相机 clock skew 和逐相机残余 offset。
+- `result/trajectory.json`：最终求解位姿，`T_frame_from_body`，平移单位 m、旋转矩阵行主序。预积分使用最终状态；连续时间按全局 affine clock 求值最终样条，不应用逐相机残余项，也不把控制节点当作轨迹。
 - 页面中采样间的平移线性插值与旋转 SLERP **仅用于播放显示**，不是额外求解点或连续样条的精确求值。静态构型单位 mm，轨迹单位 m；XYZ 为红绿蓝，相机线框只示意朝向，不是真实视场。内嵌 `D.board = { frame, tags: [{ id, corners_m }] }`：`frame` 与 `trajectory.frame` 相同（单相机/纯视觉为 `board`，相机–IMU 为 `world`；两种 IMU 求解器都把目标点直接当作世界坐标，故世界系即静止标定板系，标定板在帧内为恒等位姿）；`corners_m` 为米制四角，顺序同核心库目标几何 `(0,0) → (s,0) → (s,s) → (0,s)`，z=0。页面只绘制实际板面轮廓与配置中的 tag ID，不伪造 tag 位图。
 - `result/summary.json`：本次最终求解摘要，与页面及 `solve.yaml` 同源。轨迹/摘要/参数/HTML 共同发布；旧运行不会自动补出当时未保存的轨迹，需重新运行。
+
+`bag_exp.bag` 的逐帧曝光 metadata 验证使用固定 global/per-camera skew（共享硬件时钟域）并保持原 midpoint 求解不变。曝光时长为 `7.69–16.60 ms`，四路诊断点数分别为 `64,480 / 64,608 / 47,668 / 58,904`；将每点瞬时投影替换为曝光区间 Simpson 几何平均后，四路全量 RMS 分别由 `0.435963 / 0.429982 / 0.445776 / 0.414402 px` 变为 `0.437623 / 0.430280 / 0.446384 / 0.415338 px`，均方误差各增加 `0.001450 / 0.000257 / 0.000542 / 0.000776 px²`。即当前几何平均模型没有改善真实数据拟合，因此只保留 metadata 时间归一化和求解后诊断，不把曝光积分加入优化残差。
 
 ## 验证
 

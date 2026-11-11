@@ -134,6 +134,13 @@ pub enum FieldId {
     ImuMaxSamples,
     ImuIntegrationMethod,
     ImuKnotInterval,
+    ImuRefineCameraTimeOffsets,
+    ImuCameraTimeOffsetMinimum,
+    ImuCameraTimeOffsetMaximum,
+    ImuRefineGlobalClockSkew,
+    ImuRefineCameraClockSkews,
+    ImuClockSkewMinimum,
+    ImuClockSkewMaximum,
     ImuRefineAxes,
     ImuGyroMatrix,
     ImuAccelMatrix,
@@ -1049,6 +1056,62 @@ fn solver_rows(app: &App) -> Vec<Row> {
             imu.knot_interval_s.as_str(),
             FieldKind::Text,
             "仅连续时间使用；正值",
+        ));
+        rows.push(param_row(
+            GroupId::SolverImuNoise,
+            FieldId::ImuRefineCameraTimeOffsets,
+            "优化逐相机残余时差",
+            if imu.refine_camera_time_offsets { "x" } else { " " },
+            FieldKind::Toggle,
+            "输入时间戳已按曝光中点修正；第二遍释放非参考相机残余 offset",
+        ));
+        rows.push(param_row(
+            GroupId::SolverImuNoise,
+            FieldId::ImuCameraTimeOffsetMinimum,
+            "相机时差最小值 [s]",
+            imu.camera_time_offset_minimum_s.as_str(),
+            FieldKind::Text,
+            "所有非参考相机的共同下界",
+        ));
+        rows.push(param_row(
+            GroupId::SolverImuNoise,
+            FieldId::ImuCameraTimeOffsetMaximum,
+            "相机时差最大值 [s]",
+            imu.camera_time_offset_maximum_s.as_str(),
+            FieldKind::Text,
+            "所有非参考相机的共同上界",
+        ));
+        rows.push(param_row(
+            GroupId::SolverImuNoise,
+            FieldId::ImuRefineGlobalClockSkew,
+            "优化全局时钟漂移",
+            if imu.refine_global_clock_skew { "x" } else { " " },
+            FieldKind::Toggle,
+            "诊断选项，默认关闭；仅独立相机/IMU 时钟且已证明线性漂移时开启",
+        ));
+        rows.push(param_row(
+            GroupId::SolverImuNoise,
+            FieldId::ImuRefineCameraClockSkews,
+            "优化逐相机时钟漂移",
+            if imu.refine_camera_clock_skews { "x" } else { " " },
+            FieldKind::Toggle,
+            "诊断选项，默认关闭；共享触发/时间域应固定为 0 ppm",
+        ));
+        rows.push(param_row(
+            GroupId::SolverImuNoise,
+            FieldId::ImuClockSkewMinimum,
+            "时钟漂移最小值 [ppm]",
+            imu.clock_skew_minimum_ppm.as_str(),
+            FieldKind::Text,
+            "全局与逐相机斜率共同下界",
+        ));
+        rows.push(param_row(
+            GroupId::SolverImuNoise,
+            FieldId::ImuClockSkewMaximum,
+            "时钟漂移最大值 [ppm]",
+            imu.clock_skew_maximum_ppm.as_str(),
+            FieldKind::Text,
+            "全局与逐相机斜率共同上界",
         ));
         rows.push(param_row(
             GroupId::SolverImuAxes,

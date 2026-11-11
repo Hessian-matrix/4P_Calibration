@@ -5,10 +5,10 @@ use anyhow::{Result, bail};
 
 use crate::config::{
     BagFormatConfig, BagSourceConfig, CalibrationConfig, CameraConfig, CameraModelConfig,
-    ContinuousTimeConfig, DetectorBudgets, DetectorConfig, ImuAxisCalibrationConfig, ImuConfig,
-    ImuNoiseConfig, InertialMethod, InitialIntrinsicsConfig, IntegrationConfig, IntegrationMethod,
-    RefinementConfig, RefinementMethodConfig, RunSettings, SolverConfig, SynchronizationConfig,
-    TagFamilyConfig, TargetConfig, TimeOffsetConfig,
+    CameraTimingConfig, ContinuousTimeConfig, DetectorBudgets, DetectorConfig,
+    ImuAxisCalibrationConfig, ImuConfig, ImuNoiseConfig, InertialMethod, InitialIntrinsicsConfig,
+    IntegrationConfig, IntegrationMethod, RefinementConfig, RefinementMethodConfig, RunSettings,
+    SolverConfig, SynchronizationConfig, TagFamilyConfig, TargetConfig, TimeOffsetConfig,
 };
 
 const DEFAULT_MAX_DELTA_NS: i64 = 2_000_000;
@@ -145,6 +145,15 @@ pub struct ImuDraft {
     pub gyro_calibrated_from_raw: String,
     pub accelerometer_calibrated_from_raw: String,
     pub knot_interval_s: String,
+    pub refine_camera_time_offsets: bool,
+    pub camera_time_offset_minimum_s: String,
+    pub camera_time_offset_maximum_s: String,
+    pub refine_global_clock_skew: bool,
+    pub refine_camera_clock_skews: bool,
+    pub clock_skew_minimum_ppm: String,
+    pub clock_skew_maximum_ppm: String,
+    pub visual_motion_anisotropy_enabled: bool,
+    pub visual_motion_anisotropy_ratio_per_motion_squared: String,
 }
 
 impl Default for ImuDraft {
@@ -162,6 +171,15 @@ impl Default for ImuDraft {
             gyro_calibrated_from_raw: format_matrix(&IDENTITY_MATRIX),
             accelerometer_calibrated_from_raw: format_matrix(&IDENTITY_MATRIX),
             knot_interval_s: "0.01".to_owned(),
+            refine_camera_time_offsets: false,
+            camera_time_offset_minimum_s: "-0.005".to_owned(),
+            camera_time_offset_maximum_s: "0.005".to_owned(),
+            refine_global_clock_skew: false,
+            refine_camera_clock_skews: false,
+            clock_skew_minimum_ppm: "-200".to_owned(),
+            clock_skew_maximum_ppm: "200".to_owned(),
+            visual_motion_anisotropy_enabled: false,
+            visual_motion_anisotropy_ratio_per_motion_squared: "0.015".to_owned(),
         }
     }
 }
@@ -390,6 +408,7 @@ pub struct CameraDraft {
     pub id: String,
     pub topic: String,
     pub model: CameraModelConfig,
+    pub timing: CameraTimingConfig,
 }
 
 /// Editable configuration intent. It is intentionally independent of the
@@ -557,6 +576,7 @@ impl Draft {
                     id: camera.id.clone(),
                     topic: camera.topic.clone(),
                     model: camera.model,
+                    timing: camera.timing.clone(),
                 })
                 .collect(),
             mode,
@@ -572,7 +592,10 @@ impl Draft {
             solver,
         };
         draft.solver.pixel_sigma = format_number(
-            settings.cameras.first().map_or(1.0, |camera| camera.pixel_sigma),
+            settings
+                .cameras
+                .first()
+                .map_or(1.0, |camera| camera.pixel_sigma),
         );
         draft
     }
@@ -682,6 +705,7 @@ impl Draft {
                         1.0,
                         &mut errors,
                     ),
+                    timing: camera.timing.clone(),
                 })
                 .collect(),
             target: self.target.to_config(&mut errors),
@@ -715,6 +739,7 @@ impl Draft {
                 id,
                 topic: topic.to_owned(),
                 model: CameraModelConfig::KannalaBrandt4,
+                timing: CameraTimingConfig::default(),
             });
             if self.reference_id.trim().is_empty() {
                 self.reference_id = self.cameras[0].id.clone();
@@ -917,6 +942,23 @@ impl ImuDraft {
                 &imu.axis_calibration.accelerometer_calibrated_from_raw,
             ),
             knot_interval_s: format_number(imu.continuous_time.knot_interval_s),
+            refine_camera_time_offsets: imu.continuous_time.camera_time_offsets.refine,
+            camera_time_offset_minimum_s: format_number(
+                imu.continuous_time.camera_time_offsets.minimum_s,
+            ),
+            camera_time_offset_maximum_s: format_number(
+                imu.continuous_time.camera_time_offsets.maximum_s,
+            ),
+            refine_global_clock_skew: imu.continuous_time.clock_skews.refine_global,
+            refine_camera_clock_skews: imu.continuous_time.clock_skews.refine_cameras,
+            clock_skew_minimum_ppm: format_number(imu.continuous_time.clock_skews.minimum_ppm),
+            clock_skew_maximum_ppm: format_number(imu.continuous_time.clock_skews.maximum_ppm),
+            visual_motion_anisotropy_enabled: imu.continuous_time.visual_motion_anisotropy.enabled,
+            visual_motion_anisotropy_ratio_per_motion_squared: format_number(
+                imu.continuous_time
+                    .visual_motion_anisotropy
+                    .variance_ratio_per_motion_squared,
+            ),
         }
     }
 
@@ -943,8 +985,16 @@ impl ImuDraft {
                     errors,
                 );
                 ImuNoiseConfig {
-                    gyro_covariance_rad2_s_hz: [[gyro * gyro, 0.0, 0.0], [0.0, gyro * gyro, 0.0], [0.0, 0.0, gyro * gyro]],
-                    accelerometer_covariance_m2_s4_hz: [[accel * accel, 0.0, 0.0], [0.0, accel * accel, 0.0], [0.0, 0.0, accel * accel]],
+                    gyro_covariance_rad2_s_hz: [
+                        [gyro * gyro, 0.0, 0.0],
+                        [0.0, gyro * gyro, 0.0],
+                        [0.0, 0.0, gyro * gyro],
+                    ],
+                    accelerometer_covariance_m2_s4_hz: [
+                        [accel * accel, 0.0, 0.0],
+                        [0.0, accel * accel, 0.0],
+                        [0.0, 0.0, accel * accel],
+                    ],
                     gyro_bias_walk_rad_s2_sqrt_hz: parse_f64(
                         &self.gyro_bias_walk_rad_s2_sqrt_hz,
                         "imu.noise.gyro_bias_walk_rad_s2_sqrt_hz",
@@ -989,6 +1039,46 @@ impl ImuDraft {
                     0.01,
                     errors,
                 ),
+                camera_time_offsets: crate::config::CameraTimeOffsetsConfig {
+                    refine: self.refine_camera_time_offsets,
+                    minimum_s: parse_f64(
+                        &self.camera_time_offset_minimum_s,
+                        "imu.continuous_time.camera_time_offsets.minimum_s",
+                        -0.005,
+                        errors,
+                    ),
+                    maximum_s: parse_f64(
+                        &self.camera_time_offset_maximum_s,
+                        "imu.continuous_time.camera_time_offsets.maximum_s",
+                        0.005,
+                        errors,
+                    ),
+                },
+                clock_skews: crate::config::ClockSkewsConfig {
+                    refine_global: self.refine_global_clock_skew,
+                    refine_cameras: self.refine_camera_clock_skews,
+                    minimum_ppm: parse_f64(
+                        &self.clock_skew_minimum_ppm,
+                        "imu.continuous_time.clock_skews.minimum_ppm",
+                        -200.0,
+                        errors,
+                    ),
+                    maximum_ppm: parse_f64(
+                        &self.clock_skew_maximum_ppm,
+                        "imu.continuous_time.clock_skews.maximum_ppm",
+                        200.0,
+                        errors,
+                    ),
+                },
+                visual_motion_anisotropy: crate::config::VisualMotionAnisotropyConfig {
+                    enabled: self.visual_motion_anisotropy_enabled,
+                    variance_ratio_per_motion_squared: parse_f64(
+                        &self.visual_motion_anisotropy_ratio_per_motion_squared,
+                        "imu.continuous_time.visual_motion_anisotropy.variance_ratio_per_motion_squared",
+                        0.015,
+                        errors,
+                    ),
+                },
             },
         }
     }
@@ -1333,6 +1423,7 @@ mod tests {
                 topic: "/cam0/image_raw".to_owned(),
                 model: CameraModelConfig::KannalaBrandt4,
                 pixel_sigma: 1.0,
+                timing: CameraTimingConfig::default(),
             }],
             target: TargetConfig::default(),
             detector: DetectorConfig::default(),
@@ -1423,6 +1514,7 @@ mod tests {
             id: "cam1".to_owned(),
             topic: "/cam1/image_raw".to_owned(),
             model: CameraModelConfig::DoubleSphere,
+            timing: CameraTimingConfig::default(),
         });
         draft.intrinsic.path = "prior.yaml".to_owned();
 
@@ -1501,6 +1593,7 @@ mod tests {
             id: "cam1".to_owned(),
             topic: "/cam1/image_raw".to_owned(),
             model: CameraModelConfig::KannalaBrandt4,
+            timing: CameraTimingConfig::default(),
         });
         draft.intrinsic.strategy = IntrinsicStrategy::FileOptimize;
         draft.intrinsic.path = directory
