@@ -107,6 +107,9 @@ async function initializeApplication() {
   } catch (error) { controller.emit('init', { stage: 'failed', message: error.message }); }
 }
 $('retry-init').addEventListener('click', initializeApplication);
+const availableWorkers = Number(navigator.hardwareConcurrency);
+// Detection keeps full-resolution buffers per worker; cap the automatic choice, not manual tuning.
+$('worker-count').value = String(Number.isInteger(availableWorkers) && availableWorkers > 0 ? Math.min(8, availableWorkers) : 4);
 void initializeApplication();
 
 function updateProfileControls() {
@@ -338,13 +341,21 @@ $('cancel-run').addEventListener('click', async () => {
   try { const result = await request('runs.cancel', { runId, mode: cooperative ? 'cooperative' : 'force' }); if (result.state === 'cancelling') { $('run-state').textContent = '正在停止'; $('run-stage').textContent = '正在等待当前计算安全结束…'; $('cancel-run').textContent = '立即强制停止'; } }
   catch (error) { $('run-stage').textContent = `停止未完成：${error.message}`; }
 });
+const previewBuffers = new WeakMap();
 function renderPreview(preview, payload) {
   const width = Number(preview?.width), height = Number(preview?.height), pixels = preview?.pixels;
   if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height <= 0 || !pixels || pixels.length !== width * height) return;
   const figure = [...$('camera-previews').children].find(node => node.dataset.cameraId === payload.camera_id);
   if (!figure) return;
-  const canvas = figure.querySelector('canvas'), context = canvas.getContext('2d'); canvas.width = width; canvas.height = height;
-  const image = context.createImageData(width, height);
+  const canvas = figure.querySelector('canvas');
+  let buffers = previewBuffers.get(canvas);
+  if (!buffers || buffers.image.width !== width || buffers.image.height !== height) {
+    canvas.width = width; canvas.height = height;
+    const context = canvas.getContext('2d');
+    buffers = { context, image: context.createImageData(width, height) };
+    previewBuffers.set(canvas, buffers);
+  }
+  const { context, image } = buffers;
   for (let index = 0; index < pixels.length; index++) { const value = pixels[index]; const offset = index * 4; image.data[offset] = value; image.data[offset + 1] = value; image.data[offset + 2] = value; image.data[offset + 3] = 255; }
   context.putImageData(image, 0, 0);
   if (Array.isArray(preview.corners)) { context.fillStyle = '#4cff8d'; for (const corner of preview.corners) { const x = Number(Array.isArray(corner) ? corner[0] : corner?.x), y = Number(Array.isArray(corner) ? corner[1] : corner?.y); if (finite(x) && finite(y)) { context.beginPath(); context.arc(x, y, 2, 0, Math.PI * 2); context.fill(); } } }

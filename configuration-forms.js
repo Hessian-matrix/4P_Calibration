@@ -110,17 +110,23 @@ function cameraId(index) {
   return `cam${index}`;
 }
 
+const topicOrder = new Intl.Collator('en', { numeric: true, sensitivity: 'variant' });
+function compareTopicPaths(a, b) {
+  return topicOrder.compare(a, b) || (a < b ? -1 : a > b ? 1 : 0);
+}
+
+function sortedTopics(inspection) {
+  return Array.isArray(inspection?.topics) ? [...inspection.topics].sort((a, b) => compareTopicPaths(a.name, b.name)) : [];
+}
+
 export function createDefaultConfig(inspection = null, options = {}) {
-  const topics = Array.isArray(inspection?.topics) ? inspection.topics : [];
+  const topics = sortedTopics(inspection);
   const imageTopics = topics.filter((topic) => IMAGE_TYPES.has(topic.type_name) && topicUsable(topic));
-  const firstImage = imageTopics[0];
-  const cameras = firstImage ? [{
-    id: cameraId(0), topic: firstImage.name, model: 'double-sphere', pixel_sigma: 1,
+  const cameras = imageTopics.map((topic, index) => ({
+    id: cameraId(index), topic: topic.name, model: 'double-sphere', pixel_sigma: 1,
     timing: { timestamp_reference: 'exposure_midpoint', fixed_exposure_duration_s: null, exposure_metadata_topic: null },
-  }] : [];
-  // Start with the smallest useful run. The remaining scanned cameras and IMU stay one click away;
-  // choosing “auto mode” after enabling them derives the matching Rust calibration variant.
-  const imuTopic = null;
+  }));
+  const imuTopic = topics.find((topic) => topic.type_name === IMU_TYPE && topicUsable(topic))?.name ?? null;
   return {
     source: {
       path: options.path || inspection?.source || 'authorized-source',
@@ -267,6 +273,7 @@ export class ConfigurationForms {
 
   setInspection(inspection, options = {}) {
     const old = this.config;
+    const preserveSelection = old.cameras.length > 0 || Boolean(this.inspection?.topics?.length);
     this.inspection = inspection && typeof inspection === 'object' ? clone(inspection) : null;
     if (options.files || options.sourceFiles || options.auxiliaryFiles) {
       this.setAuxiliaryFiles(options.auxiliaryFiles || options.sourceFiles || options.files, false);
@@ -277,9 +284,11 @@ export class ConfigurationForms {
     });
     const topics = Array.isArray(this.inspection?.topics) ? this.inspection.topics : [];
     const retainedCameras = (old.cameras || []).filter((camera) => topics.some((topic) => topic.name === camera.topic && IMAGE_TYPES.has(topic.type_name) && topicUsable(topic)));
-    generated.cameras = retainedCameras.length ? clone(retainedCameras) : generated.cameras;
-    const retainedImu = topics.some((topic) => topic.name === old.source?.imu_topic && topic.type_name === IMU_TYPE && topicUsable(topic));
-    generated.source.imu_topic = retainedImu ? old.source.imu_topic : null;
+    if (preserveSelection) {
+      generated.cameras = clone(retainedCameras);
+      const retainedImu = topics.some((topic) => topic.name === old.source?.imu_topic && topic.type_name === IMU_TYPE && topicUsable(topic));
+      generated.source.imu_topic = retainedImu ? old.source.imu_topic : null;
+    }
     generated.target = clone(old.target || generated.target);
     generated.detector = clone(old.detector || generated.detector);
     generated.solver = clone(old.solver || generated.solver);
@@ -382,7 +391,7 @@ export class ConfigurationForms {
   }
 
   _renderSensors() {
-    const topics = Array.isArray(this.inspection?.topics) ? this.inspection.topics : [];
+    const topics = sortedTopics(this.inspection);
     const selectedByTopic = new Map(this.config.cameras.map((camera) => [camera.topic, camera]));
     const reason = (topic) => {
       if (!IMAGE_TYPES.has(topic.type_name) && topic.type_name !== IMU_TYPE) return `不支持的消息类型：${topic.type_name || '未知'}`;
@@ -404,6 +413,10 @@ export class ConfigurationForms {
     const durationSource = timing.exposure_metadata_topic ? 'metadata' : timing.fixed_exposure_duration_s != null ? 'fixed' : 'none';
     const advancedSettings = advancedCamera ? `<details class="cf-camera-advanced" open><summary>相机高级设置：像素噪声、曝光与时间戳</summary><label>编辑相机<select data-camera-advanced-select>${this.config.cameras.map((camera) => `<option value="${escapeHtml(camera.topic)}"${selected(advancedCamera.topic, camera.topic)}>${escapeHtml(camera.id)} · ${escapeHtml(camera.topic)}</option>`).join('')}</select></label><div class="cf-camera-advanced-grid"><label>角点像素标准差（px）<input type="number" min="0" step="any" data-camera-field="pixel_sigma" data-camera-topic="${escapeHtml(advancedCamera.topic)}" value="${escapeHtml(advancedCamera.pixel_sigma)}"></label><label>Header 时间含义<select data-camera-field="timestamp_reference" data-camera-topic="${escapeHtml(advancedCamera.topic)}"><option value="exposure_midpoint"${selected(timing.timestamp_reference, 'exposure_midpoint')}>曝光中点</option><option value="trigger"${selected(timing.timestamp_reference, 'trigger')}>曝光开始 Trigger</option></select></label><label>曝光时长来源<select data-camera-field="duration_source" data-camera-topic="${escapeHtml(advancedCamera.topic)}"><option value="none"${selected(durationSource, 'none')}>不提供（中点时间戳可用）</option><option value="fixed"${selected(durationSource, 'fixed')}>固定时长</option><option value="metadata"${selected(durationSource, 'metadata')}>std_msgs/String 元数据话题</option></select></label><label${durationSource === 'fixed' ? '' : ' hidden'}>固定曝光时长（s）<input type="number" min="0" step="any" data-camera-field="fixed_exposure_duration_s" data-camera-topic="${escapeHtml(advancedCamera.topic)}" value="${escapeHtml(timing.fixed_exposure_duration_s ?? 0.01)}"></label><label${durationSource === 'metadata' ? '' : ' hidden'}>曝光元数据话题<input data-camera-field="exposure_metadata_topic" data-camera-topic="${escapeHtml(advancedCamera.topic)}" value="${escapeHtml(timing.exposure_metadata_topic || '')}" placeholder="/camera/frame_metadata"></label></div></details>` : '';
     this.containers.sensors.innerHTML = `<div class="panel"><div class="row"><h2>扫描所得传感器</h2><span class="badge">${topics.length} 个话题</span></div><p class="small">勾选图像或单选 IMU 后自动推断标定模式；不可用与不支持的话题保持只读并说明原因。</p><div class="cf-topic-table-wrap"><table class="cf-topic-table"><thead><tr><th>启用</th><th>Topic / 类型</th><th>类别 / 数量 / 频率</th><th>状态</th><th>相机 ID</th><th>标定模型</th></tr></thead><tbody>${rows}</tbody></table></div><label><input type="radio" name="cf-imu-topic" data-imu-choice=""${checked(!this.config.source.imu_topic)}> 不使用 IMU</label>${advancedSettings}<details><summary>高级同步设置</summary><label>最大近同步差（ns）<input type="number" min="0" step="1" data-field="max_delta_ns" value="${escapeHtml(this.config.source.synchronization.max_delta_ns)}"></label><label><input type="checkbox" data-field="require_all_cameras"${checked(this.config.source.synchronization.require_all_cameras)}> 每个近同步组要求所有相机都有原始帧</label></details></div>`;
+    const hint = document.createElement('p'); hint.className = 'small';
+    const imuCount = topics.filter((topic) => topic.type_name === IMU_TYPE && topicUsable(topic)).length;
+    hint.textContent = '首次解析默认启用全部可用图像话题，按路径自然排序分配 cam0、cam1…；重新解析保留已有选择与 ID。' + (imuCount > 1 ? ` 当前有 ${imuCount} 路可用 IMU；求解器只支持一路，首次默认选择排序后的第一路，可在表中切换。` : ' 有可用 IMU 时默认启用，并自动推断联合标定模式。');
+    this.containers.sensors.querySelector('.cf-topic-table-wrap').before(hint);
   }
 
   _renderTarget() {
@@ -646,9 +659,10 @@ export class ConfigurationForms {
     if (!enabled && index >= 0) this.config.cameras.splice(index, 1);
     if (enabled && index < 0) {
       const used = new Set(this.config.cameras.map((camera) => camera.id));
-      let next = 0;
+      let next = Math.max(0, sortedTopics(this.inspection).filter((topic) => IMAGE_TYPES.has(topic.type_name) && topicUsable(topic)).findIndex((topic) => topic.name === topicName));
       while (used.has(cameraId(next))) next += 1;
       this.config.cameras.push({ id: cameraId(next), topic: topicName, model: 'double-sphere', pixel_sigma: 1, timing: { timestamp_reference: 'exposure_midpoint', fixed_exposure_duration_s: null, exposure_metadata_topic: null } });
+      this.config.cameras.sort((a, b) => compareTopicPaths(a.topic, b.topic));
     }
     const ids = new Set(this.config.cameras.map((camera) => camera.id));
     const first = this.config.cameras[0]?.id || '';

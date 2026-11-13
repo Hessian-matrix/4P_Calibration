@@ -1,9 +1,12 @@
 const PROTOCOL = 'fourp.worker.v1';
 const MAX_READ = 16 * 1024 * 1024;
 const INSPECTION_PROGRESS_INTERVAL_MS = 100;
+const RUN_EVENT_BATCH_LIMIT = 32;
+const RUN_EVENT_BATCH_INTERVAL_MS = 50;
 let generation = null;
 let engine = null;
 let reader = null;
+let wasmMemory = null;
 let filesByHandle = new Map();
 let cancelView = null;
 let activeInspection = null;
@@ -15,6 +18,62 @@ function parseJson(value, label) {
 function serializeError(error, code = 'RUN_FAILED') {
   return { code, message: error instanceof Error ? error.message : String(error), details: error?.details ?? null, retryable: false };
 }
+function createRunDelivery(runId) {
+  return { runId, nextSeq: 0n, pending: [], transfers: [], transferSet: new Set(), lastSentAt: performance.now() };
+}
+
+function flushRunEvents(state, now = performance.now()) {
+  if (!state || state.pending.length === 0) return;
+  const events = state.pending;
+  const transfers = state.transfers;
+  state.pending = [];
+  state.transfers = [];
+  state.transferSet = new Set();
+  state.lastSentAt = now;
+  send('run-events', { runId: state.runId, events }, transfers);
+}
+
+function attachPreviewPixels(event, pixels) {
+  const preview = event?.kind === 'detectionProgress' ? event.payload?.preview : null;
+  if (pixels == null) {
+    if (preview && Object.hasOwn(preview, 'pixels')) throw new TypeError('Preview pixels must not be encoded in run event JSON');
+    if (preview) throw new TypeError('Preview metadata is missing its pixel callback argument');
+    return null;
+  }
+  if (!(pixels instanceof Uint8Array) || !preview || Object.hasOwn(preview, 'pixels')) throw new TypeError('Invalid preview pixel callback argument');
+  const width = Number(preview.width), height = Number(preview.height);
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width <= 0 || height <= 0 || pixels.byteLength !== width * height) throw new RangeError('Preview pixel length does not match its metadata');
+  const shared = typeof SharedArrayBuffer !== 'undefined' && pixels.buffer instanceof SharedArrayBuffer;
+  let owned = pixels;
+  if (shared || pixels.buffer === wasmMemory?.buffer) {
+    owned = new Uint8Array(pixels.byteLength);
+    owned.set(pixels);
+  }
+  if (!(owned.buffer instanceof ArrayBuffer)) throw new TypeError('Preview pixels do not have a transferable ArrayBuffer');
+  preview.pixels = owned;
+  return owned.buffer;
+}
+
+function enqueueRunEvent(state, event, pixels) {
+  const now = performance.now();
+  if (event.kind === 'stage') {
+    flushRunEvents(state, now);
+    const buffer = attachPreviewPixels(event, pixels);
+    state.nextSeq += 1n;
+    send('run-events', { runId: state.runId, events: [{ seq: String(state.nextSeq), event }] }, buffer ? [buffer] : []);
+    state.lastSentAt = now;
+    return;
+  }
+  const buffer = attachPreviewPixels(event, pixels);
+  state.nextSeq += 1n;
+  state.pending.push({ seq: String(state.nextSeq), event });
+  if (buffer && !state.transferSet.has(buffer)) {
+    state.transferSet.add(buffer);
+    state.transfers.push(buffer);
+  }
+  if (state.pending.length >= RUN_EVENT_BATCH_LIMIT || now - state.lastSentAt >= RUN_EVENT_BATCH_INTERVAL_MS) flushRunEvents(state, now);
+}
+
 
 function emitInspectionProgress(state, force = false) {
   if (!state || activeInspection !== state) return;
@@ -67,6 +126,7 @@ async function initialize(message) {
   for (const name of required) if (typeof module[name] !== 'function') throw new Error(`Engine export missing: ${name}`);
   if (message.profile === 'cpu-rayon' && (typeof module.initThreadPool !== 'function' || typeof module.cancellation_flag_ptr !== 'function')) throw new Error('Thread engine cancellation exports missing');
   const wasm = await module.default(message.wasmBytes);
+  wasmMemory = wasm.memory ?? null;
   engine = module;
   if (message.profile === 'cpu-rayon') { send('init-stage', { stage: 'pool', message: `初始化 ${message.requestedWorkers} 个 Rayon Worker…`, ready: 0, planned: message.requestedWorkers }); await module.initThreadPool(message.requestedWorkers); currentWorkerCount = message.requestedWorkers; }
   let cancelMemory = null, cancelPointer = null;
@@ -88,6 +148,7 @@ function bindFiles(message) {
 onmessage = async ({ data: message }) => {
   if (!message || message.protocol !== PROTOCOL) return;
   if (message.type !== 'init' && message.generation !== generation) return;
+  let runDelivery = null;
   try {
     if (message.type === 'init') return await initialize(message);
     if (!engine) throw new Error('Engine is not initialized');
@@ -109,16 +170,20 @@ onmessage = async ({ data: message }) => {
       return send('inspection-completed', { inspectionId: message.inspectionId, value });
     }
     if (message.type === 'run') {
-      let eventSeq = 0n;
-      const value = parseJson(engine.run_calibration(message.config, JSON.stringify(message.source), (eventJson) => {
+      runDelivery = createRunDelivery(message.runId);
+      const output = engine.run_calibration(message.config, JSON.stringify(message.source), (eventJson, previewPixels) => {
         const event = parseJson(eventJson, 'run event');
         if (event.kind === 'stage') event.stage = event.payload;
-        eventSeq += 1n;
-        send('run-event', { runId: message.runId, seq: String(eventSeq), event });
-      }), 'run_calibration');
-      return send('run-completed', { runId: message.runId, value, lastSeq: String(eventSeq) });
+        enqueueRunEvent(runDelivery, event, previewPixels);
+      });
+      flushRunEvents(runDelivery);
+      const value = parseJson(output, 'run_calibration');
+      return send('run-completed', { runId: message.runId, value, lastSeq: String(runDelivery.nextSeq) });
     }
   } catch (error) {
+    // Synchronous WASM prevents timer callbacks; all queued telemetry must be posted before
+    // any error/cancellation terminal. Worker message ordering then preserves the sequence tail.
+    try { flushRunEvents(runDelivery); } catch (flushError) { error = flushError; }
     if (message.type === 'init') return send('init-failed', { error: serializeError(error, 'ENGINE_NOT_READY') });
     if (error instanceof WebAssembly.RuntimeError) return send('error', { requestId: message.requestId, inspectionId: message.inspectionId, runId: message.runId, operation: message.type, error: serializeError(error, 'ENGINE_TRAP') });
     if (message.type === 'run' && cancelView && Atomics.load(cancelView, 0) !== 0) return send('run-cancelled', { runId: message.runId });

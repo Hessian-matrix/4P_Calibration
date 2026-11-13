@@ -77,7 +77,11 @@ export class TaskController extends EventTarget {
       const inspection = this.inspections.get(message.inspectionId); if (inspection) Object.assign(inspection, { status: 'completed', result: message.value, completedAt: Date.now() });
       return this.resolvePending(message.inspectionId, message.value);
     }
-    if (message.type === 'run-event') return this.appendRunEvent(message.runId, message.seq, message.event);
+    if (message.type === 'run-events') {
+      if (!Array.isArray(message.events)) return;
+      for (const item of message.events) this.appendRunEvent(message.runId, item.seq, item.event);
+      return;
+    }
     if (message.type === 'run-cancelled') { const run = this.runs.get(message.runId); if (run && (run.state === 'running' || run.state === 'cancelling')) { run.state = 'running'; this.appendRunEvent(run.id, run.lastSeq + 1n, { stage: 'cancelled', kind: 'state', payload: { state: 'cancelled', mode: 'cooperative' } }); run.state = 'cancelled'; run.terminationReason = 'cooperative'; this.activeRunId = null; this.emit('cancelled', { runId: run.id }); } return; }
     if (message.type === 'run-completed') return this.completeRun(message.runId, message.value, message.lastSeq);
   }

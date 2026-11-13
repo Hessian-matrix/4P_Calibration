@@ -58,7 +58,7 @@
       <div id="panel-board" class="tab-panel" role="tabpanel" aria-labelledby="tab-board"><div id="board-forms"></div></div>
       <div id="panel-solver" class="tab-panel" role="tabpanel" aria-labelledby="tab-solver" hidden><div id="solver-forms"></div></div>
       <div id="panel-compute" class="tab-panel" role="tabpanel" aria-labelledby="tab-compute" hidden>
-        <div class="form-grid"><label class="field">计算方式<select id="profile"><option value="cpu-single">兼容模式 · CPU</option><option value="cpu-rayon" selected>多核模式 · CPU</option></select></label><label class="field">CPU 工作线程数<input id="worker-count" type="number" min="1" max="32" step="1" value="4"></label></div><p id="profile-status" class="small" role="status">默认多核 4 线程；修改后自动应用。运行或解析期间不可修改。</p>
+        <div class="form-grid"><label class="field">计算方式<select id="profile"><option value="cpu-single">兼容模式 · CPU</option><option value="cpu-rayon" selected>多核模式 · CPU</option></select></label><label class="field">CPU 工作线程数<input id="worker-count" type="number" min="1" max="32" step="1" value="4"></label></div><p id="profile-status" class="small" role="status">按浏览器报告的并行度自动选择，默认最多 8 线程以限制图像缓冲内存；可手动调整。运行或解析期间不可修改。</p>
       </div>
       <div id="panel-advanced" class="tab-panel" role="tabpanel" aria-labelledby="tab-advanced" hidden>
         <p>导入后仍按相同规则检查；通常无需直接编辑配置文本。</p><label>导入已有配置<input id="import-config-file" type="file" accept=".yaml,.yml,.json"></label><div class="button-row"><button id="export-config">导出当前配置</button><span id="config-revision" class="mono small"></span></div><label>配置文本<textarea id="config-editor" rows="12" spellcheck="false"></textarea></label><button id="apply-config-text">应用配置文本</button>
