@@ -19,7 +19,7 @@ function installStyles() {
 }
 #frame-bars.fh-root .fh-bar {
   position: absolute;
-  right: var(--fh-right);
+  right: 0;
   bottom: 0;
   width: max(1px, calc(1% - 2px));
   height: max(2px, var(--fh-height));
@@ -27,7 +27,7 @@ function installStyles() {
   min-height: 2px;
   border-radius: 2px 2px 0 0;
   background: var(--green, #155f35);
-  transform: scaleY(var(--fh-rise, 1));
+  transform: translateX(calc(-1 * var(--fh-slot, 0) * var(--fh-step, 0px))) scaleY(var(--fh-rise, 1));
   transform-origin: center bottom;
   will-change: auto;
 }
@@ -40,8 +40,8 @@ function installStyles() {
   will-change: transform;
 }
 #frame-bars.fh-root[data-phase="shift"] .fh-bar {
-  transition: right ${SHIFT_MS}ms cubic-bezier(.22, 1, .36, 1);
-  will-change: right;
+  transition: transform ${SHIFT_MS}ms cubic-bezier(.22, 1, .36, 1);
+  will-change: transform;
 }
 #frame-bars.fh-root[data-reduced-motion="true"] .fh-bar {
   transition: none !important;
@@ -65,10 +65,10 @@ function display(value) {
 /**
  * A bounded, real-event-only frame histogram.
  *
- * Animated updates have two deliberately separate phases: new bars first rise
- * in their final slots, then the previously rendered bars slide left. Bursts
- * are coalesced into small batches; the pending queue retains only the newest
- * LIMIT events, so a producer can never create an unbounded animation backlog.
+ * Animated updates have two deliberately separate phases: old bars slide left
+ * to clear space, then new bars rise in those slots. Rendering is scheduled on
+ * the main thread and never acknowledges or blocks the compute Worker. Bursts
+ * are coalesced; the pending queue retains only the newest LIMIT events.
  */
 export class FrameHistory {
   constructor(root, label, { reducedMotion = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)') } = {}) {
@@ -88,6 +88,10 @@ export class FrameHistory {
     this.phaseTimer = 0;
 
     root.classList.add('fh-root');
+    this.resizeObserver = new ResizeObserver(([entry]) => {
+      root.style.setProperty('--fh-step', `${entry.contentRect.width / LIMIT}px`);
+    });
+    this.resizeObserver.observe(root);
     root.dataset.phase = 'idle';
     this.onMotionChange = () => {
       this.root.dataset.reducedMotion = String(this.motionReduced());
@@ -155,6 +159,16 @@ export class FrameHistory {
 
     this.activeBatch = this.queue.splice(0, MAX_BATCH);
     this.raiseScale(this.activeBatch);
+    if (!this.entries.length) { this.riseBatch(); return; }
+    this.root.dataset.phase = 'shift';
+    for (let index = 0; index < this.entries.length; index += 1) {
+      this.position(this.entries[this.entries.length - index - 1], index + this.activeBatch.length);
+    }
+    this.phaseTimer = setTimeout(() => this.riseBatch(), SHIFT_MS);
+  }
+
+  riseBatch() {
+    this.phaseTimer = 0;
     const batchSize = this.activeBatch.length;
     this.root.dataset.phase = 'rise';
     for (let index = 0; index < batchSize; index += 1) {
@@ -170,21 +184,11 @@ export class FrameHistory {
       this.frameRequest = requestAnimationFrame(() => {
         this.frameRequest = 0;
         for (const entry of this.activeBatch) entry.element.style.setProperty('--fh-rise', '1');
-        this.phaseTimer = setTimeout(() => this.shiftBatch(), RISE_MS);
+        this.phaseTimer = setTimeout(() => this.completeBatch(), RISE_MS);
       });
     });
   }
 
-  shiftBatch() {
-    this.phaseTimer = 0;
-    if (!this.activeBatch.length) return;
-    const shift = this.activeBatch.length;
-    this.root.dataset.phase = 'shift';
-    for (let index = 0; index < this.entries.length; index += 1) {
-      this.position(this.entries[this.entries.length - index - 1], index + shift);
-    }
-    this.phaseTimer = setTimeout(() => this.completeBatch(), SHIFT_MS);
-  }
 
   completeBatch() {
     this.phaseTimer = 0;
@@ -252,7 +256,7 @@ export class FrameHistory {
   }
 
   position(entry, slot) {
-    entry.element?.style.setProperty('--fh-right', `${slot}%`);
+    entry.element?.style.setProperty('--fh-slot', String(slot));
   }
 
   positionAll() {

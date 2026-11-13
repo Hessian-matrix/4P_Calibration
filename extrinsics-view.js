@@ -28,6 +28,66 @@ function setStyles(element, styles) {
   Object.assign(element.style, styles);
   return element;
 }
+function dataVector(THREE, values) {
+  return new THREE.Vector3(...values).applyAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2);
+}
+
+function makeCubeLabel(THREE, text, color) {
+  const canvas = document.createElement('canvas'); canvas.width = 128; canvas.height = 128;
+  const context = canvas.getContext('2d'); context.fillStyle = '#edf5ef'; context.fillRect(0, 0, 128, 128); context.strokeStyle = color; context.lineWidth = 6; context.strokeRect(3, 3, 122, 122); context.fillStyle = color; context.font = '700 44px system-ui, sans-serif'; context.textAlign = 'center'; context.textBaseline = 'middle'; context.fillText(text, 64, 64);
+  const texture = new THREE.CanvasTexture(canvas); texture.colorSpace = THREE.SRGBColorSpace;
+  return new THREE.MeshBasicMaterial({ map: texture });
+}
+
+function installViewCube(THREE, viewport, camera, controls, renderMain) {
+  const overlay = setStyles(document.createElement('div'), { position: 'absolute', top: '8px', right: '8px', width: '112px', height: '112px', zIndex: '2', cursor: 'pointer' });
+  overlay.setAttribute('aria-label', '坐标轴视角方块，点击面可对齐视角');
+  const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true }); renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2)); renderer.setClearColor(0, 0); setStyles(renderer.domElement, { width: '100%', height: '100%', display: 'block' }); overlay.append(renderer.domElement); viewport.append(overlay);
+  const cubeScene = new THREE.Scene(); const cubeCamera = new THREE.OrthographicCamera(-1.45, 1.45, 1.45, -1.45, 0.1, 10); cubeCamera.position.z = 4;
+  const cube = new THREE.Mesh(new THREE.BoxGeometry(1.35, 1.35, 1.35), [
+    makeCubeLabel(THREE, '+X', '#b23a32'), makeCubeLabel(THREE, '−X', '#b23a32'),
+    makeCubeLabel(THREE, '+Z', '#356aa8'), makeCubeLabel(THREE, '−Z', '#356aa8'),
+    makeCubeLabel(THREE, '−Y', '#287c4a'), makeCubeLabel(THREE, '+Y', '#287c4a'),
+  ]);
+  cubeScene.add(cube);
+  const faceDirections = [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, -1, 0], [0, 1, 0]];
+  const raycaster = new THREE.Raycaster(); const pointer = new THREE.Vector2(); let animation = 0;
+  const draw = () => { cube.quaternion.copy(camera.quaternion).invert(); renderer.render(cubeScene, cubeCamera); };
+  const cancel = () => { cancelAnimationFrame(animation); animation = 0; };
+  const resize = () => { const size = Math.max(1, Math.min(112, overlay.clientWidth)); renderer.setSize(size, size, false); draw(); };
+  const align = (direction) => {
+    cancel();
+    const target = controls.target.clone();
+    const radius = camera.position.distanceTo(target);
+    const start = camera.quaternion.clone();
+    const endCamera = camera.clone();
+    const axis = dataVector(THREE, direction).normalize();
+    // OrbitControls uses Y-up; stay a tiny angle off its polar singularity.
+    if (Math.abs(direction[2]) > 0.5) axis.z = direction[2] > 0 ? 1e-5 : -1e-5;
+    endCamera.position.copy(target).addScaledVector(axis.normalize(), radius);
+    endCamera.lookAt(target);
+    const end = endCamera.quaternion.clone(), orientation = new THREE.Quaternion();
+    const offset = new THREE.Vector3(0, 0, radius), started = performance.now();
+    const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const tick = (now) => {
+      const raw = reduced ? 1 : Math.min(1, (now - started) / 480), t = raw * raw * (3 - 2 * raw);
+      orientation.slerpQuaternions(start, end, t);
+      camera.position.copy(offset).applyQuaternion(orientation).add(target);
+      camera.quaternion.copy(orientation); renderMain(); draw();
+      if (raw < 1) animation = requestAnimationFrame(tick);
+      else { animation = 0; controls.update(); }
+    };
+    animation = requestAnimationFrame(tick);
+  };
+  const click = (event) => { const rect = renderer.domElement.getBoundingClientRect(); pointer.set(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1); raycaster.setFromCamera(pointer, cubeCamera); const hit = raycaster.intersectObject(cube)[0]; if (hit?.face) align(faceDirections[hit.face.materialIndex]); };
+  const chooser = document.createElement('select'); chooser.setAttribute('aria-label', '对齐坐标轴视角'); setStyles(chooser, { width: '112px', padding: '3px', fontSize: '12px' });
+  chooser.append(new Option('对齐视角…', ''));
+  for (const [index, name] of ['+X · YZ 面', '−X · YZ 面', '+Z · XY 面', '−Z · XY 面', '−Y · XZ 面', '+Y · XZ 面'].entries()) chooser.append(new Option(name, String(index)));
+  chooser.addEventListener('change', () => { if (chooser.value !== '') align(faceDirections[Number(chooser.value)]); chooser.value = ''; }); overlay.append(chooser);
+  overlay.addEventListener('click', click); controls.addEventListener('start', cancel); controls.addEventListener('change', draw);
+  const observer = new ResizeObserver(resize); observer.observe(overlay); resize();
+  return { cancel, dispose() { cancel(); controls.removeEventListener('start', cancel); controls.removeEventListener('change', draw); overlay.removeEventListener('click', click); observer.disconnect(); renderer.dispose(); renderer.forceContextLoss(); cube.geometry.dispose(); for (const material of cube.material) { material.map?.dispose(); material.dispose(); } overlay.remove(); } };
+}
 
 function makeLabel(THREE, text, worldHeight) {
   const canvas = document.createElement('canvas');
@@ -113,7 +173,7 @@ export function extrinsicsView(result) {
   const copy = document.createElement('div');
   const description = document.createElement('p');
   description.className = 'small';
-  description.textContent = '共同参考系中的相机位姿 · 米 · 已对 camera-from-reference 求逆';
+  description.textContent = '共同参考系中的相机位姿 · 米 · +Z 朝上，XY 为水平面（与 CLI 一致）';
   setStyles(description, { margin: '0 0 3px' });
   const help = document.createElement('p');
   help.className = 'small';
@@ -200,7 +260,8 @@ export function extrinsicsView(result) {
 
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(42, 1, 0.001, 1000);
-    const positions = [new THREE.Vector3(0, 0, 0), ...poses.map((pose) => new THREE.Vector3(...pose.position))];
+    const rig = new THREE.Group(); rig.rotation.x = -Math.PI / 2; scene.add(rig);
+    const positions = [new THREE.Vector3(0, 0, 0), ...poses.map((pose) => dataVector(THREE, pose.position))];
     const bounds = new THREE.Box3().setFromPoints(positions);
     const center = bounds.getCenter(new THREE.Vector3());
     const rawRadius = Math.max(...positions.map((position) => position.distanceTo(center)));
@@ -212,7 +273,7 @@ export function extrinsicsView(result) {
     grid.material.transparent = true;
     grid.material.opacity = 0.72;
     scene.add(grid);
-    scene.add(new THREE.AxesHelper(glyphSize * 1.8));
+    rig.add(new THREE.AxesHelper(glyphSize * 1.8));
     const reference = usesInertialReference ? 'IMU' : String(result.reference_camera ?? '参考系');
     const referenceLabel = makeLabel(THREE, reference, glyphSize * 0.68);
     referenceLabel.position.set(0, glyphSize * 0.45, 0);
@@ -222,7 +283,7 @@ export function extrinsicsView(result) {
     const connections = new THREE.LineSegments(connectionGeometry, new THREE.LineDashedMaterial({ color: 0xa9bdae, dashSize: glyphSize * 0.12, gapSize: glyphSize * 0.09, transparent: true, opacity: 0.75 }));
     connections.computeLineDistances();
     scene.add(connections);
-    for (const pose of poses) addCameraGlyph(THREE, scene, pose, glyphSize);
+    for (const pose of poses) addCameraGlyph(THREE, rig, pose, glyphSize);
 
     const framingRadius = Math.max(rawRadius + glyphSize * 2.5, glyphSize * 4);
     const distance = framingRadius / Math.sin(THREE.MathUtils.degToRad(camera.fov / 2)) * 1.15;
@@ -247,7 +308,9 @@ export function extrinsicsView(result) {
 
     const render = () => renderer.render(scene, camera);
     controls.addEventListener('change', render);
+    let viewCube;
     const resetView = () => {
+      viewCube?.cancel();
       controls.reset();
       render();
     };
@@ -271,6 +334,7 @@ export function extrinsicsView(result) {
     }
 
     cleanup = () => {
+      viewCube?.dispose();
       resizeObserver?.disconnect();
       if (!resizeObserver) window.removeEventListener('resize', resize);
       reset.removeEventListener('click', resetView);
@@ -297,6 +361,7 @@ export function extrinsicsView(result) {
     };
 
     viewport.replaceChildren(renderer.domElement);
+    viewCube = installViewCube(THREE, viewport, camera, controls, render);
     reset.disabled = false;
     resize();
   })().catch((error) => {

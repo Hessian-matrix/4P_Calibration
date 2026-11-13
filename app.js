@@ -5,6 +5,7 @@ import { ConfigurationForms } from './configuration-forms.js';
 import { ResultsView } from './results-view.js';
 import { FrameHistory } from './frame-history.js';
 import { ConvergenceView } from './convergence-view.js';
+import { StageTiming } from './stage-timing.js';
 
 const $ = (id) => document.getElementById(id);
 const controller = new TaskController();
@@ -12,6 +13,7 @@ const api = installBrowserApi(controller);
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
 const frameHistory = new FrameHistory($('frame-bars'), $('frame-bars-label'), { reducedMotion: reduceMotion });
 const convergenceView = new ConvergenceView($('convergence-view'));
+const stageTiming = new StageTiming($('stage-timing'));
 let source = null, inspectionId = null, draft = null, preflight = null, runId = null;
 let configDirty = true, settingCanonical = false, busy = false, bindingGeneration = 0;
 let profilePromise = null, profileTimer = null;
@@ -302,6 +304,7 @@ $('preflight-button').addEventListener('click', () => void checkSettings());
 function resetTelemetry() {
   frameHistory.reset(forms.getConfig().target.id_rows_front_view_left_to_right.flat().length);
   convergenceView.reset();
+  stageTiming.start(forms.getConfig().cameras, controller.inspections.get(inspectionId)?.result?.topics ?? []);
   for (const id of ['metric-fps', 'metric-average-fps', 'metric-workers', 'metric-iteration']) $(id).textContent = '—';
   $('frame-rows').innerHTML = '<tr class="placeholder"><td colspan="8">等待真实检测事件</td></tr>';
   $('camera-previews').replaceChildren();
@@ -368,6 +371,7 @@ function appendDetection(payload) {
 controller.addEventListener('event', ({ detail }) => {
   if (detail.runId !== runId) return;
   convergenceView.event(detail);
+  stageTiming.event(detail);
   const payload = detail.payload || {}, workerCount = payload.workers ?? controller.runs.get(runId)?.workerCount ?? controller.capabilities?.threads;
   let progress = workerCount == null ? '' : ` · ${workerCount} 个工作线程`;
   if (detail.kind === 'detectionProgress') {
@@ -399,6 +403,7 @@ controller.addEventListener('complete', async ({ detail }) => {
   if (detail.runId !== runId) return;
   frameHistory.stop();
   convergenceView.stop('求解完成');
+  stageTiming.stop('已完成');
   $('run-state').textContent = '已完成'; $('run-stage').textContent = '标定与结果文件已生成'; $('cancel-run').hidden = true; $('start-run').disabled = false; $('compute-activity').classList.remove('running');
   $('result-status').textContent = '结果已生成。请检查误差和参数，应用前仍需人工验收。'; $('result-output').textContent = pretty(detail.result);
   try {
@@ -414,7 +419,7 @@ controller.addEventListener('complete', async ({ detail }) => {
   } catch (error) { resultView.render({ result: detail.result, summary: null }); $('result-status').textContent = `结果已生成，但摘要读取失败：${error.message}`; }
   milestone('results');
 });
-function finishRun(state, message) { frameHistory.stop(); convergenceView.stop(state); $('run-state').textContent = state; $('run-stage').textContent = message; $('cancel-run').hidden = true; $('start-run').disabled = false; $('compute-activity').classList.remove('running'); }
+function finishRun(state, message) { frameHistory.stop(); convergenceView.stop(state); stageTiming.stop(state); $('run-state').textContent = state; $('run-stage').textContent = message; $('cancel-run').hidden = true; $('start-run').disabled = false; $('compute-activity').classList.remove('running'); }
 controller.addEventListener('failed', ({ detail }) => { if (detail.runId === runId) finishRun('未完成', `标定失败：${detail.error.message}`); });
 controller.addEventListener('cancelled', ({ detail }) => { if (detail.runId === runId) finishRun('已停止', '本次计算已停止，没有发布未完成的结果。'); });
 async function importConfiguration(text) { const value = await controller.callWorker({ type: 'validate', requestId: crypto.randomUUID(), config: text }); setCanonical(value.config); configDirty = true; preflight = null; $('config-status').textContent = '配置已导入，可继续调整。'; }
