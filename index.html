@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>4P 标定工作台</title>
+  <link rel="stylesheet" href="./style.css">
+  <script type="module" src="./app.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="#boot">4P <span>Calibration</span></a>
+  <nav aria-label="标定流程">
+    <a href="#boot" data-section="boot">引擎</a><a href="#source" data-section="source">数据</a><a href="#inspection" data-section="inspection">解析</a><a href="#sensors" data-section="sensors">话题</a><a href="#compute" data-section="compute">配置</a><a href="#run" data-section="run">计算</a><a href="#results" data-section="results">结果</a>
+  </nav>
+  <span id="engine-badge" class="badge">正在准备</span>
+</header>
+<noscript><p class="alert">请启用 JavaScript 使用本地标定工作台。</p></noscript>
+<main>
+  <section id="boot" class="work-block boot" aria-labelledby="boot-title" aria-busy="true">
+    <div class="block-number">01</div><div class="block-content">
+      <div class="section-head"><div><p class="eyebrow">ENGINE INIT</p><h1 id="boot-title">正在准备本地引擎</h1></div><button id="retry-init" hidden>重新准备</button></div>
+      <p id="boot-status" role="status" aria-live="polite">首次打开需要下载计算组件，数据不会上传。</p>
+      <div id="boot-progress" class="progress indeterminate" aria-hidden="true"><span></span></div><p id="boot-bytes" class="mono small"></p>
+    </div>
+  </section>
+
+  <section id="source" class="work-block" aria-labelledby="source-title">
+    <div class="block-number">02</div><div class="block-content">
+      <div class="section-head"><div><p class="eyebrow">SOURCE</p><h1 id="source-title">导入标定数据</h1></div><label class="inline-field">数据格式<select id="source-format"><option value="ros1_v2">ROS1 · .bag 文件</option><option value="ros2_mcap">ROS2 · .mcap 文件</option><option value="ros2_sqlite3">ROS2 · .db3 数据目录</option></select></label></div>
+      <div id="file-zone" class="file-zone" tabindex="0" role="button" aria-controls="source-files source-directory" aria-disabled="true">
+        <strong id="file-zone-title">选择数据文件</strong><span id="file-zone-hint">点击选择，或把文件拖到这里</span>
+        <button id="choose-source" class="primary" type="button" disabled>选择文件</button>
+        <input id="source-files" type="file" multiple disabled hidden tabindex="-1">
+        <input id="source-directory" type="file" webkitdirectory multiple disabled hidden tabindex="-1">
+      </div>
+      <ul id="file-list" class="file-list"><li>尚未选择文件</li></ul><p id="source-status" role="status">准备完成后即可选择数据。</p>
+    </div>
+  </section>
+
+  <section id="inspection" class="work-block" aria-labelledby="inspection-title">
+    <div class="block-number">03</div><div class="block-content">
+      <div class="section-head"><div><p class="eyebrow">INSPECTION</p><h1 id="inspection-title">解析数据清单</h1></div><div class="button-row"><button id="inspect-source" disabled>重新解析</button><button id="cancel-inspection" class="danger" hidden>取消解析</button></div></div>
+      <p id="inspection-status">导入数据后自动解析容器和话题。</p><div id="inspection-progress" class="progress idle" aria-hidden="true"><span></span></div><p id="inspection-bytes" class="mono small"></p>
+      <details class="advanced"><summary>原始解析结果</summary><pre id="inspection-output" class="output">尚无解析结果</pre></details>
+    </div>
+  </section>
+
+  <section id="sensors" class="work-block" aria-labelledby="sensors-title">
+    <div class="block-number">04</div><div class="block-content"><p class="eyebrow">TOPICS</p><h1 id="sensors-title">选择相机与 IMU 话题</h1><p class="lead">仅显示数据中实际发现的话题；选择会直接写入当前配置。</p><div id="sensor-forms" class="compact-form"><p>请先导入并解析数据。</p></div></div>
+  </section>
+
+  <section id="compute" class="work-block" aria-labelledby="compute-title">
+    <div class="block-number">05</div><div class="block-content"><p class="eyebrow">CONFIGURATION</p><h1 id="compute-title">标定配置</h1>
+      <div class="tabs" role="tablist" aria-label="配置分组">
+        <button id="tab-board" role="tab" aria-selected="true" aria-controls="panel-board">标定板</button><button id="tab-solver" role="tab" aria-selected="false" aria-controls="panel-solver" tabindex="-1">求解器</button><button id="tab-compute" role="tab" aria-selected="false" aria-controls="panel-compute" tabindex="-1">计算</button><button id="tab-advanced" role="tab" aria-selected="false" aria-controls="panel-advanced" tabindex="-1">高级</button>
+      </div>
+      <div id="panel-board" class="tab-panel" role="tabpanel" aria-labelledby="tab-board"><div id="board-forms"></div></div>
+      <div id="panel-solver" class="tab-panel" role="tabpanel" aria-labelledby="tab-solver" hidden><div id="solver-forms"></div></div>
+      <div id="panel-compute" class="tab-panel" role="tabpanel" aria-labelledby="tab-compute" hidden>
+        <div class="form-grid"><label class="field">计算方式<select id="profile"><option value="cpu-single">兼容模式 · CPU</option><option value="cpu-rayon" selected>多核模式 · CPU</option></select></label><label class="field">CPU 工作线程数<input id="worker-count" type="number" min="1" max="32" step="1" value="4"></label></div><p id="profile-status" class="small" role="status">默认多核 4 线程；修改后自动应用。运行或解析期间不可修改。</p>
+      </div>
+      <div id="panel-advanced" class="tab-panel" role="tabpanel" aria-labelledby="tab-advanced" hidden>
+        <p>导入后仍按相同规则检查；通常无需直接编辑配置文本。</p><label>导入已有配置<input id="import-config-file" type="file" accept=".yaml,.yml,.json"></label><div class="button-row"><button id="export-config">导出当前配置</button><span id="config-revision" class="mono small"></span></div><label>配置文本<textarea id="config-editor" rows="12" spellcheck="false"></textarea></label><button id="apply-config-text">应用配置文本</button>
+      </div>
+      <div class="config-footer"><p id="config-status" role="status">使用默认设置或按需调整，开始前会自动检查。</p><button id="validate-config" disabled>检查当前设置</button></div>
+    </div>
+  </section>
+
+  <section id="run" class="work-block" aria-labelledby="run-title">
+    <div class="block-number">06</div><div class="block-content"><div class="section-head"><div><p class="eyebrow">COMPUTE MONITOR</p><h1 id="run-title">计算监视器</h1></div><span id="run-state" class="badge">尚未开始</span></div>
+      <div id="run-overview" class="summary-line"></div><ul id="preflight" class="checks"><li>开始前检查数据、传感器和标定板设置。</li></ul><div class="button-row"><button id="preflight-button">检查设置</button><button id="start-run" class="primary">开始标定</button><button id="cancel-run" class="danger" hidden>停止标定</button></div>
+      <div id="compute-activity" class="compute-activity" role="img" aria-label="逐帧 Tag 数，等待检测"><div id="frame-bars"></div></div><p id="frame-bars-label" class="small">一柱一帧 · 右侧最新 · 等待真实检测事件</p><p id="run-stage" role="status" aria-live="polite">开始后显示真实阶段、吞吐和工作线程。</p>
+      <div class="telemetry-grid"><div class="metric"><span>实时 FPS</span><strong id="metric-fps">—</strong></div><div class="metric"><span>平均 FPS</span><strong id="metric-average-fps">—</strong></div><div class="metric"><span>工作线程</span><strong id="metric-workers">—</strong></div><div class="metric"><span>求解迭代</span><strong id="metric-iteration">—</strong></div></div>
+      <div class="live-grid"><div id="camera-previews" class="camera-previews"><p class="small">等待各相机真实抽样图像</p></div><div class="imu-card"><h2>IMU 实时值</h2><dl id="imu-values"><div><dt>样本</dt><dd>—</dd></div><div><dt>时间戳</dt><dd>—</dd></div><div><dt>角速度 rad/s</dt><dd>—</dd></div><div><dt>比力 m/s²</dt><dd>—</dd></div></dl></div></div>
+      <div class="table-wrap"><table class="telemetry-table"><caption>逐帧检测 · 仅保留最新 200 行；完整日志可在结果产物中下载</caption><thead><tr><th>相机</th><th>帧</th><th>时间戳</th><th>标签</th><th>角点</th><th>FPS</th><th>平均</th><th>Worker</th></tr></thead><tbody id="frame-rows"><tr class="placeholder"><td colspan="8">等待真实检测事件</td></tr></tbody></table></div>
+      <div class="solve-line"><strong id="solve-phase">求解尚未开始</strong><span id="solve-work"></span></div>
+      <div id="convergence-view" class="result-section" style="margin-top:12px"></div>
+      <details class="advanced"><summary>详细运行日志 · 最近 100 条，按需展开；完整数值日志可下载</summary><ol id="event-log" class="event-log"></ol></details>
+    </div>
+  </section>
+
+  <section id="results" class="work-block" aria-labelledby="results-title">
+    <div class="block-number">07</div><div class="block-content"><p class="eyebrow">RESULTS / EXTRINSICS</p><h1 id="results-title">结果与外参</h1><p id="result-status">完成标定后，这里显示真实误差、参数和产物。</p><div id="result-summary"></div><div id="extrinsics-view"></div><div class="artifact-panel"><h2>保存结果</h2><ul id="artifact-list" class="file-list"><li>尚无结果文件</li></ul></div><details class="advanced"><summary>完整结果参数</summary><pre id="result-output" class="output"></pre></details></div>
+  </section>
+</main>
+<footer><span>4P Calibration · <span id="version">正在加载</span></span><span>本地 CPU 计算 · 数据不上传 · 结果需人工验收</span></footer>
+</body></html>

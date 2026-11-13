@@ -1,0 +1,27 @@
+{
+  "manifestVersion": 1,
+  "releaseId": "0.1.4",
+  "buildId": "c446f902ce31869b0a91e25dbcd499688b2d6616400be39feaabbb16a65a63fb",
+  "engineApi": "fourp.engine.v1",
+  "executionProfile": "cpu-rayon",
+  "resources": [
+    {
+      "role": "glue",
+      "url": "c446f902ce31869b0a91e25dbcd499688b2d6616400be39feaabbb16a65a63fb/four_p_calibration.js",
+      "bytes": "19398",
+      "sha256": "deb9f5af9a8ee9e091d01b54503278c4f3e7e7875b1773be0cfecd8eff29561c"
+    },
+    {
+      "role": "wasm",
+      "url": "c446f902ce31869b0a91e25dbcd499688b2d6616400be39feaabbb16a65a63fb/four_p_calibration_bg.wasm",
+      "bytes": "3988261",
+      "sha256": "9278b0e344beb5cc364c76782796bd297d3a571d7c2933c5166392244db2fee5"
+    },
+    {
+      "role": "module",
+      "url": "c446f902ce31869b0a91e25dbcd499688b2d6616400be39feaabbb16a65a63fb/snippets/wasm-bindgen-rayon-38edf6e439f6d70d/src/workerHelpers.no-bundler.js",
+      "bytes": "2947",
+      "sha256": "9801503f464f848c6c7405462fca9a5c721556904c5fee5ee0afcb0887ea1b7f"
+    }
+  ]
+}
