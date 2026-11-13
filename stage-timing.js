@@ -28,7 +28,7 @@ export class StageTiming {
   }
 
   setStage(stage) {
-    if (!stage || stage === this.stage) return;
+    if (!stage || stage === this.stage || ['cancelling', 'cancelled', 'completed', 'failed'].includes(stage)) return;
     this.stage = stage;
     this.started = performance.now();
     this.render();
