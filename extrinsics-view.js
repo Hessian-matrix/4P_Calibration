@@ -80,10 +80,6 @@ function installViewCube(THREE, viewport, camera, controls, renderMain) {
     animation = requestAnimationFrame(tick);
   };
   const click = (event) => { const rect = renderer.domElement.getBoundingClientRect(); pointer.set(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1); raycaster.setFromCamera(pointer, cubeCamera); const hit = raycaster.intersectObject(cube)[0]; if (hit?.face) align(faceDirections[hit.face.materialIndex]); };
-  const chooser = document.createElement('select'); chooser.setAttribute('aria-label', '对齐坐标轴视角'); setStyles(chooser, { width: '112px', padding: '3px', fontSize: '12px' });
-  chooser.append(new Option('对齐视角…', ''));
-  for (const [index, name] of ['+X · YZ 面', '−X · YZ 面', '+Z · XY 面', '−Z · XY 面', '−Y · XZ 面', '+Y · XZ 面'].entries()) chooser.append(new Option(name, String(index)));
-  chooser.addEventListener('change', () => { if (chooser.value !== '') align(faceDirections[Number(chooser.value)]); chooser.value = ''; }); overlay.append(chooser);
   overlay.addEventListener('click', click); controls.addEventListener('start', cancel); controls.addEventListener('change', draw);
   const observer = new ResizeObserver(resize); observer.observe(overlay); resize();
   return { cancel, dispose() { cancel(); controls.removeEventListener('start', cancel); controls.removeEventListener('change', draw); overlay.removeEventListener('click', click); observer.disconnect(); renderer.dispose(); renderer.forceContextLoss(); cube.geometry.dispose(); for (const material of cube.material) { material.map?.dispose(); material.dispose(); } overlay.remove(); } };
