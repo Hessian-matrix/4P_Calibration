@@ -223,10 +223,15 @@ $('source-format').addEventListener('change', () => {
   $('source-status').textContent = '请重新选择数据。';
 });
 updateSourceEntry();
+function renderInspectionBytes(progress = {}) {
+  const fileBytes = source.files.reduce((total, file) => total + BigInt(file.size), 0n);
+  $('inspection-bytes').textContent = `所选文件总大小 ${formatBytes(fileBytes)} · 累计读取 ${formatBytes(progress.bytesRead ?? 0)}（含重复读取，可超过文件大小）· ${progress.readCalls ?? 0} 次读取`;
+}
 async function inspectSource(generation = bindingGeneration) {
   if (!source) return;
   $('inspect-source').disabled = true; $('cancel-inspection').hidden = false; $('inspection-status').textContent = '正在解析容器与话题…';
   setProgress($('inspection-progress'), 0, null);
+  renderInspectionBytes();
   try {
     ({ inspectionId } = await request('sources.inspect', { sourceId: source.sourceId, sourceRevision: source.sourceRevision }));
     updateProfileControls();
@@ -254,10 +259,8 @@ $('cancel-inspection').addEventListener('click', async () => {
 });
 controller.addEventListener('inspection-progress', ({ detail }) => {
   if (!inspectionId || detail.inspectionId !== inspectionId) return;
-  const read = BigInt(detail.bytesRead ?? 0);
-  const total = detail.totalBytes ?? detail.total ?? null;
-  setProgress($('inspection-progress'), read, total);
-  $('inspection-bytes').textContent = `${formatBytes(read)} 已读取 · ${detail.readCalls ?? 0} 次读取${total == null ? ' · 总量未知' : ` / ${formatBytes(total)}`}`;
+  setProgress($('inspection-progress'), 0, null);
+  renderInspectionBytes(detail);
 });
 
 const tabs = [...document.querySelectorAll('[role=tab]')];
