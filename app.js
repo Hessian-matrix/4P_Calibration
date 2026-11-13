@@ -360,28 +360,54 @@ function renderImu(payload) {
   values[2].textContent = vectorText(payload.gyro_rad_s);
   values[3].textContent = vectorText(payload.specific_force_m_s2);
 }
-function appendDetection(payload) {
-  frameHistory.push(payload);
-  $('frame-rows').querySelector('.placeholder')?.remove();
+function appendDetection(payload, rows) {
   const row = document.createElement('tr');
   const cells = [payload.camera_id, payload.frames_processed, payload.timestamp_ns, payload.tags, payload.points, finite(payload.frames_per_second) ? Number(payload.frames_per_second).toFixed(1) : null, finite(payload.average_frames_per_second) ? Number(payload.average_frames_per_second).toFixed(1) : null, payload.workers];
   for (const value of cells) { const cell = document.createElement('td'); cell.textContent = value == null ? '—' : String(value); row.append(cell); }
-  $('frame-rows').append(row); while ($('frame-rows').rows.length > 200) $('frame-rows').deleteRow(0);
+  rows.append(row);
+}
+let detectionRenderTimer = 0;
+let pendingDetectionEvents = [];
+function flushDetectionRendering() {
+  clearTimeout(detectionRenderTimer); detectionRenderTimer = 0;
+  const batch = pendingDetectionEvents; pendingDetectionEvents = [];
+  if (!batch.length) return;
+  const rows = document.createDocumentFragment(), previews = new Map();
+  for (const [index, detail] of batch.entries()) {
+    appendDetection(detail.payload, rows);
+    if (detail.payload.preview) previews.set(detail.payload.camera_id, detail.payload);
+    renderRunEvent(detail, index === batch.length - 1);
+  }
+  $('frame-rows').querySelector('.placeholder')?.remove();
+  $('frame-rows').append(rows);
+  while ($('frame-rows').rows.length > 200) $('frame-rows').deleteRow(0);
+  for (const payload of previews.values()) renderPreview(payload.preview, payload);
 }
 controller.addEventListener('event', ({ detail }) => {
   if (detail.runId !== runId) return;
-  convergenceView.event(detail);
   stageTiming.event(detail);
+  if (detail.kind === 'detectionProgress') {
+    frameHistory.push(detail.payload);
+    pendingDetectionEvents.push(detail);
+    if (pendingDetectionEvents.length > 200) pendingDetectionEvents.shift();
+    if (!detectionRenderTimer) detectionRenderTimer = setTimeout(flushDetectionRendering, 100);
+    return;
+  }
+  flushDetectionRendering();
+  renderRunEvent(detail);
+});
+function renderRunEvent(detail, latest = true) {
+  convergenceView.event(detail);
   const payload = detail.payload || {}, workerCount = payload.workers ?? controller.runs.get(runId)?.workerCount ?? controller.capabilities?.threads;
   let progress = workerCount == null ? '' : ` · ${workerCount} 个工作线程`;
-  if (detail.kind === 'detectionProgress') {
+  if (detail.kind === 'detectionProgress' && latest) {
     $('metric-fps').textContent = displayNumber(payload.frames_per_second); $('metric-average-fps').textContent = displayNumber(payload.average_frames_per_second); $('metric-workers').textContent = payload.workers == null ? String(workerCount ?? '—') : String(payload.workers);
-    appendDetection(payload); if (payload.preview) renderPreview(payload.preview, payload); if (payload.latest_imu) renderImu(payload.latest_imu);
+    if (payload.latest_imu) renderImu(payload.latest_imu);
     progress += `${payload.frames_processed == null ? '' : ` · 已处理 ${payload.frames_processed} 帧`}${finite(payload.average_frames_per_second) ? ` · 平均 ${Number(payload.average_frames_per_second).toFixed(1)} FPS` : ''}`;
   } else if (detail.kind === 'imuProgress') renderImu(payload);
   else if (detail.kind === 'solveProgress') { $('metric-iteration').textContent = `${payload.iteration ?? '—'} / ${payload.max_iterations ?? '—'}`; $('solve-phase').textContent = 'LM 求解迭代'; $('solve-work').textContent = `iter ${payload.iteration ?? '—'} / ${payload.max_iterations ?? '—'} · cost ${finite(payload.cost) ? Number(payload.cost).toExponential(4) : '—'}`; }
   else if (detail.kind === 'solveActivity') { $('solve-phase').textContent = payload.phase == null ? '求解活动' : String(payload.phase); $('solve-work').textContent = payload.completed != null && payload.total != null ? `${payload.completed} / ${payload.total}${payload.iteration == null ? '' : ` · iter ${payload.iteration}`}` : payload.iteration == null ? '工作量不可计数' : `iter ${payload.iteration} · 工作量不可计数`; }
-  $('run-stage').textContent = `${stageNames[detail.stage] || detail.stage || '正在计算'} · ${(detail.elapsedMs / 1000).toFixed(1)} 秒${progress}`;
+  if (latest) $('run-stage').textContent = `${stageNames[detail.stage] || detail.stage || '正在计算'} · ${(detail.elapsedMs / 1000).toFixed(1)} 秒${progress}`;
   const { preview, ...numericPayload } = payload;
   if (preview) numericPayload.preview = { width: preview.width, height: preview.height, corners: preview.corners?.length ?? 0, pixels: '图像仅在预览显示，不转储像素' };
   const li = document.createElement('li'), entry = document.createElement('details'), summary = document.createElement('summary');
@@ -392,7 +418,7 @@ controller.addEventListener('event', ({ detail }) => {
   });
   li.append(entry); $('event-log').append(li);
   while ($('event-log').children.length > 100) $('event-log').firstElementChild.remove();
-});
+}
 async function artifactBytes(artifact) {
   const chunks = []; let offset = 0n; const total = BigInt(artifact.length);
   while (offset < total) { const length = Number(total - offset > 4194304n ? 4194304n : total - offset); const part = await request('artifacts.read', { artifactId: artifact.artifactId, offset: String(offset), length }); chunks.push(part.data); offset += BigInt(length); }
@@ -401,6 +427,7 @@ async function artifactBytes(artifact) {
 function downloadBlob(blob, name) { const url = URL.createObjectURL(blob), anchor = document.createElement('a'); anchor.href = url; anchor.download = name; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 0); }
 controller.addEventListener('complete', async ({ detail }) => {
   if (detail.runId !== runId) return;
+  flushDetectionRendering();
   frameHistory.stop();
   convergenceView.stop('求解完成');
   stageTiming.stop('已完成');
@@ -419,7 +446,7 @@ controller.addEventListener('complete', async ({ detail }) => {
   } catch (error) { resultView.render({ result: detail.result, summary: null }); $('result-status').textContent = `结果已生成，但摘要读取失败：${error.message}`; }
   milestone('results');
 });
-function finishRun(state, message) { frameHistory.stop(); convergenceView.stop(state); stageTiming.stop(state); $('run-state').textContent = state; $('run-stage').textContent = message; $('cancel-run').hidden = true; $('start-run').disabled = false; $('compute-activity').classList.remove('running'); }
+function finishRun(state, message) { flushDetectionRendering(); frameHistory.stop(); convergenceView.stop(state); stageTiming.stop(state); $('run-state').textContent = state; $('run-stage').textContent = message; $('cancel-run').hidden = true; $('start-run').disabled = false; $('compute-activity').classList.remove('running'); }
 controller.addEventListener('failed', ({ detail }) => { if (detail.runId === runId) finishRun('未完成', `标定失败：${detail.error.message}`); });
 controller.addEventListener('cancelled', ({ detail }) => { if (detail.runId === runId) finishRun('已停止', '本次计算已停止，没有发布未完成的结果。'); });
 async function importConfiguration(text) { const value = await controller.callWorker({ type: 'validate', requestId: crypto.randomUUID(), config: text }); setCanonical(value.config); configDirty = true; preflight = null; $('config-status').textContent = '配置已导入，可继续调整。'; }

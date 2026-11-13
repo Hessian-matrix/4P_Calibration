@@ -122,7 +122,8 @@ export class FrameHistory {
     const tags = validCount(payload?.tags);
     if (tags === null) return;
 
-    this.queue.push({ payload, tags, element: null });
+    const { camera_id, camera, frame_id, frame, frames_processed, timestamp_ns, timestamp } = payload;
+    this.queue.push({ payload: { camera_id, camera, frame_id, frame, frames_processed, timestamp_ns, timestamp }, tags, element: null });
     if (this.queue.length > LIMIT) this.queue.splice(0, this.queue.length - LIMIT);
     if (!this.activeBatch.length && !this.frameRequest) {
       this.frameRequest = requestAnimationFrame(() => {
