@@ -6,7 +6,61 @@
 
 `camera_corelib` 的各 crate 作为独立 `.crate` 发布在内部 GitLab `corp` Cargo registry。4P 固定依赖 `ccl_image`、`ccl_calib`、`ccl_geometry` 和 `ccl_rosbag` 的精确版本，由 Cargo 在统一依赖图中编译；不再分发或注入预编译 `.rlib`。
 
-当前精确版本为 `ccl_calib =0.5.0`、`ccl_rosbag =0.4.0`、`ccl_geometry =0.1.0`、`ccl_image =0.3.0`，均来自 `corp` registry，不依赖相邻 `camera_corelib` 源码目录。`ccl_calib 0.5.0` 提供当前使用的仿射相机时钟与运动方向视觉权重 API；同步提交 `Cargo.lock`，使用 `cargo build --locked --all-targets` 验证固定依赖构建。
+当前应用清单固定 `ccl_calib =0.6.0`、`ccl_rosbag =0.5.0`、`ccl_geometry =0.1.0`、`ccl_image =0.3.0`。前三者从 `corp` registry 解析；本轮未发布的 `ccl_image` workspace API 通过清单内 patch 使用相邻源码。`ccl_calib 0.6.0` / `ccl_rosbag 0.5.0` 的 WASM 改动此前只用隔离本地 registry 验证，普通环境仍需要对应包；当前不是仅拉取已发布依赖即可构建的状态。集成与验证身份见下方性能报告。
+
+## 浏览器版方案与交互设计
+
+- [WASM CPU、Rayon 多线程与 GitHub Pages 方案](docs/wasm-acceleration-plan.md)
+- [网页形态、交互与初始化加载设计](docs/web-workbench-design.md)
+- [Agent 浏览器 API 契约与静态部署边界](docs/browser-agent-api.md)
+- [浏览器安全、数据处理与本地发布边界](docs/browser-security.md)
+- [可交互设计原型](web/design/index.html)：浅色工作台、文件元信息、板布局预览、真实环境检测和加载状态样式；**未接入标定引擎或 Agent API，不产生标定结果**。
+
+设计原型：`python3 -m http.server 8765 --bind 127.0.0.1`，访问 `http://127.0.0.1:8765/web/design/`。
+
+实际浏览器应用位于 `web/app/`，与原型分离。依赖可解析且已安装 `wasm32-unknown-unknown` target 后，安装与 `Cargo.lock` 对应的 `wasm-bindgen-cli`，执行：
+
+```sh
+python3 tools/build_web.py --debug
+python3 tools/serve_web.py
+# http://127.0.0.1:8766/
+```
+
+页面使用同一 Rust runner 和 corelib，在 Worker 中按范围读取用户授权的文件；配置、扫描、真实运行事件、结果及产物下载与 `window.fourP` 共用任务控制器。浏览器只提供 `cpu-single` 与 `cpu-rayon` 两个执行档：单线程档通过销毁 Worker 强制取消；Rayon 共享内存档使用原子标志协作取消。线程构建命令为 `python3 tools/build_web.py --threads --debug`，需要指定的 nightly/rust-src 与跨源隔离。开发服务器直接提供隔离响应头；无自定义响应头的静态子路径另通过 Service Worker 建立隔离。
+
+生产页采用七个连续区块：引擎加载 → 统一文件导入 → 读取解析 → 话题选择 → Tab 配置 → 计算监控 → 标定结果。阶段完成后平滑滚动并高亮下一块，不做整屏翻页。下载显示真实累计资源字节；随机读取解析没有可信总工作量时只显示阶段动画与累计读取量。监控显示实际速度、线程数、最近逐帧记录和采样图像/IMU 数据，结果用紧凑表格与适用的内嵌外参视图展示；无对应数据时明确标记缺失。
+
+首次进入只显示说明，点击“加载本地计算引擎”后才下载并初始化。页面提供项目/反馈入口，明确文件授权、本地计算及托管资源请求边界；就绪后显示版本、执行档和完整构建哈希。HTML CSP 限制脚本与网络来源，不允许普通字符串 eval。本轮安全加固只在本地修改，待 GPU 开发完成后再决定统一发布，不代表 Google Safe Browsing 标记已经解除。
+
+网页默认选择多核 CPU，工作线程数为 `min(hardwareConcurrency, 8)`，浏览器未报告时使用 4；仍可手动设置 1–32。自动上限用于限制每线程图像缓冲内存，不是所有设备/数据的最优值，大图或内存受限时应减少线程。修改后自动应用，输入停顿 350 ms 后生效；初始化、运行和解析期间锁定算力设置。缺少共享内存或跨源隔离时明确失败，不静默降档。
+
+首次解析默认启用所有可用图像话题，按话题路径自然排序（camera2 在 camera10 前）分配 cam0、cam1…；自动按相机数量与 IMU 选择推断标定类型。求解器支持一路 IMU，多路可用时默认选择排序后的第一路并提示可切换；重新解析保留手动选择、ID 与模型。
+
+网页收敛图默认显示本次运行的全部代价报告：线性化活动不清空历史，相同迭代号的更新仍追加；阶段变化或迭代号回退只新增分段，不自动切换查看范围。横轴使用累计报告序号，悬停可查看原始迭代号、阶段与 cost；分段之间不连线，不同目标函数的 cost 不直接比较。可以手动筛选单段再返回全部历史，结束后保留曲线，仅开始新任务时重置。已用真实求解记录回放验证两段共 31 个报告点全部保留。
+
+公开静态站点：<https://hessian-matrix.github.io/4P_Calibration/>，由独立 `gh-pages` 分支根目录发布；源码分支的修改不会自动上线。发布内容包含页面及两套 manifest 引用的 CPU 引擎，不能包含数据集、凭据或运行结果。上传必须保留文件原始字节（Git API 使用 base64 blob，不以文本读取后重编码），否则 CRLF 转 LF 会破坏 manifest 长度和 SHA-256。已在线验证可信 HTTPS、Service Worker 跨源隔离与实际 4 线程 WASM 初始化；此次检查不代表重新完成数值标定验收。
+
+网页解析区分别显示所选文件总大小与累计读取量。累计读取统计每次文件读取，包含重复区间，因此可能超过文件大小；它不是文件体积或完成百分比。重新解析会重置读取显示，完成前保持不定进度；真实 `ext_sync_exp_1600.bag` 的文件大小显示 1.49 GB，解析累计读取 2.99 GB。
+
+网页检测柱带先将旧柱左移，再升起新柱；位移使用 `transform`，队列与显示均有上限，不向计算 Worker 发送动画完成确认。检测表格、指标、日志按 100 ms 合批更新，预览按批次保留每相机最新一帧；完整数值事件与产物不受显示窗口裁剪影响。柱带队列仅保留数字元数据，不持有预览像素。减少动态效果时直接显示最新柱带。
+
+预览像素通过独立 Uint8Array 与 transferable ArrayBuffer 传输，不进入 JSON；后端遥测在 Worker 中按最多 32 条或 callback 检查到 50 ms 合批，阶段切换和终态前先发送尾批。公开订阅仍逐条接收事件；强制销毁 Worker 可能丢失未发送尾批，不保证强制终止前遥测完整。
+
+CPU 利用率验证：同一真实 bag 的 cam0、2265 帧，同一中间构建下 4/8 线程检测平均为 47.20/70.14 FPS；移除额外 JSON Value 复制、预分配角点结果及复用预览 ImageData 后，最终 8 线程构建为 61.82 FPS。均为顺序单次测量，不能将差值归因于某个小优化。最终运行 125 次预览只分配一次 ImageData，不重复调整相同尺寸的 canvas。逐帧 Tag/点数一致，同线程数最终参数逐值一致；4/8 线程最大内参差约 4.72e-9。详细边界见 [CPU 验证记录](docs/wasm-acceleration-plan.md)。
+
+浏览器输入与检测器复用改造见 [施工与实测报告](docs/browser-performance-implementation.md)：交错对照中读取/检测均值减少约 11.2%，完整角点与最终结果一致；固定 `baton_bag` 缺失，正式标定验收仍未完成。本地开发构建通过 `Cargo.toml` 的 `ccl_image` patch 使用相邻 `../camera_corelib/crates/ccl_image` 源码；这是未发布的联合开发状态，不是 registry 中同版本已获得新 API。构建需要这两个工作树，不修改 registry 缓存。`input.yaml.performance` 记录读取准备、提交、worker 等待、结果回收延迟、预览和 core 检测子阶段；各 worker 经过时间相互重叠，不是 CPU 时间。
+
+计算区显示当前阶段与阶段耗时；检测阶段按已解析的所选相机消息总数、逐相机完成数及后端累计平均 FPS 估算剩余时间，不包含后续求解。无有效速率时显示估算中，进度超过 5 秒未更新时暂停估算；求解与导出没有可靠剩余量时不提供虚构 ETA。停止或完成后冻结耗时。
+
+内嵌外参视图遵循 CLI 的参考系 +Z 向上、XY 水平约定：有 IMU 时使用 IMU 参考系，仅旋转显示空间，不修改外参。右上角方块随视角旋转，仅通过点击方块面来对齐 YZ/XZ/XY 平面，不再提供对齐视角下拉框；保留当前观察中心和距离，以 480 ms 动画切换。拖动或重置可中断，减少动态效果时直接切换；静止时不运行持续渲染循环。
+
+GitHub Pages 交互性能验证：同一 Chromium、`ext_sync_exp_1600.bag` 的 cam0 共 2265 帧、同一 `c446f902…` WASM、4 线程与相同配置，合批前后检测平均为 45.1 / 52.8 FPS，主线程布局累计约 2.12 / 0.51 s，结果 JSON 一致；均为顺序单次测量，不能视为稳定加速比。引擎就绪后断网仍完成标定且运行期没有新增资源请求，证明检测无需 Pages 网络；前端与 Worker 仍共享设备资源，不能承诺零开销。这是界面和性能验证，不替代固定 `baton_bag` 数值验收。
+
+已实际验证 Chromium 的单线程与 4 线程 Rayon 构建均完成 24 帧/1532 点合成数据标定；corelib RMS 约 0.392643 px、P95 约 0.663777 px，与原生结果一致；OpenCV 相同原生角点的零畸变针孔参考 RMS 0.392642 px、P95 0.664173 px。ROS1 bag、MCAP、SQLite3 均已完成单相机浏览器闭环；API 幂等启动、强制取消和共享原子标志协作取消已验证。原生 `cargo test --locked --lib --tests` 通过 70 项测试。
+
+纯静态子路径 `/app/` 已验证 Service Worker 建立跨源隔离后才开放文件选择。`python3 tools/package_web.py DESTINATION` 校验两套 CPU 引擎 manifest、长度和 SHA-256，生成本地静态目录；不会上传或发布。固定 `baton_bag` 路径仍缺失，不能宣称完成正式数值验收；真实数据 `ext_sync_exp_1600.bag` 只用于交互与性能验证，不能替代固定基线。
+
+真实 JPEG 整包 CPU 多线程已验证：上述 cam0 配置使用 4 个 Rayon Worker，总墙钟 46.429 s，对照单线程 154.929 s，单次约 3.34 倍；逐帧点数一致，内参最大绝对差小于 $9.44\times10^{-9}$。两档是不同 WASM 构建，结果不作为纯线程数加速基准，也不能外推到其他数据、设备或求解模式。当前推荐 `cpu-rayon`，不满足共享内存与跨源隔离条件时可显式选择 `cpu-single`。
 
 ## 构建与运行
 

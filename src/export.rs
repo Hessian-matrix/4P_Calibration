@@ -1,6 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 use ccl_calib::camera::continuous_time::ImuAxisCalibration;
@@ -9,7 +9,7 @@ use ccl_geometry::Pose3;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{RunSettings, TargetConfig};
-use crate::run_record::{RunContext, atomic_write, read_yaml};
+use crate::run_record::RunContext;
 use crate::runner::SolveSummary;
 use crate::trajectory::Trajectory;
 
@@ -523,7 +523,14 @@ impl PoseOutput {
 }
 
 pub fn load_result(path: &Path) -> Result<CalibrationOutput> {
-    let result: CalibrationOutput = read_yaml(path)?;
+    let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    load_result_bytes(&bytes).with_context(|| format!("parse {}", path.display()))
+}
+
+/// Parses and validates a calibration result supplied by a non-filesystem host.
+pub fn load_result_bytes(bytes: &[u8]) -> Result<CalibrationOutput> {
+    let result: CalibrationOutput =
+        serde_yaml::from_slice(bytes).context("parse calibration result yaml")?;
     result.validate()?;
     Ok(result)
 }
@@ -636,42 +643,33 @@ fn extrinsics_html(
 
 pub fn publish(run: &RunContext, output: &CalibrationOutput, summary: &SolveSummary) -> Result<()> {
     output.validate()?;
-    let trajectory_bytes =
-        fs::read(run.root().join("trajectory.json")).context("read final solved trajectory")?;
+    let trajectory_bytes = run
+        .read(Path::new("trajectory.json"))
+        .context("read final solved trajectory")?;
     let trajectory: Trajectory =
         serde_json::from_slice(&trajectory_bytes).context("parse final solved trajectory")?;
     // The run's immutable `config.yaml` snapshot is the only source for board geometry.
-    let settings: RunSettings = read_yaml(&run.root().join("config.yaml"))
+    let settings_bytes = run
+        .read(Path::new("config.yaml"))
         .context("read run settings for visualization")?;
+    let settings: RunSettings = serde_yaml::from_slice(&settings_bytes)
+        .context("parse run settings for visualization")?;
     settings
         .validate()
         .context("validate run settings snapshot for visualization")?;
     let board = board_payload(&settings, &trajectory.frame)?;
-    let temporary = run.root().join(".result.tmp");
-    let final_path = run.root().join("result");
-    ensure!(!final_path.exists(), "result directory already exists");
-    if temporary.exists() {
-        fs::remove_dir_all(&temporary)
-            .with_context(|| format!("remove stale {}", temporary.display()))?;
-    }
-    fs::create_dir(&temporary).with_context(|| format!("create {}", temporary.display()))?;
-    let publish_result = (|| {
-        let yaml = serde_yaml::to_string(output).context("serialize calibration result")?;
-        atomic_write(&temporary.join("calibration.yaml"), yaml.as_bytes())?;
-        atomic_write(&temporary.join("trajectory.json"), &trajectory_bytes)?;
-        let summary_json = serde_json::to_vec_pretty(summary).context("serialize solve summary")?;
-        atomic_write(&temporary.join("summary.json"), &summary_json)?;
-        let html = extrinsics_html(output, summary, &trajectory, &board)
-            .context("render calibration visualization")?;
-        atomic_write(&temporary.join("extrinsics_3d.html"), html.as_bytes())?;
-        fs::rename(&temporary, &final_path)
-            .with_context(|| format!("publish {}", final_path.display()))?;
-        Ok(())
-    })();
-    if publish_result.is_err() {
-        let _ = fs::remove_dir_all(&temporary);
-    }
-    publish_result
+
+    let yaml = serde_yaml::to_string(output).context("serialize calibration result")?;
+    let summary_json = serde_json::to_vec_pretty(summary).context("serialize solve summary")?;
+    let html = extrinsics_html(output, summary, &trajectory, &board)
+        .context("render calibration visualization")?;
+    let artifacts = BTreeMap::from([
+        (PathBuf::from("calibration.yaml"), yaml.into_bytes()),
+        (PathBuf::from("trajectory.json"), trajectory_bytes),
+        (PathBuf::from("summary.json"), summary_json),
+        (PathBuf::from("extrinsics_3d.html"), html.into_bytes()),
+    ]);
+    run.publish(Path::new("result"), artifacts)
 }
 
 fn rotation_to_quaternion(rotation: [[f64; 3]; 3]) -> [f64; 4] {

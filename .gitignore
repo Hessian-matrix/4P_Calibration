@@ -19,6 +19,7 @@ target/
 .archive/
 .release/
 release/
+web/app/engine/
 
 # macOS 文件元数据
 .DS_Store

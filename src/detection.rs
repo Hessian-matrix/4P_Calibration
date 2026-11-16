@@ -93,15 +93,17 @@ impl FrameDetector {
         image_size: CalibrationImageSize,
         image: detection::ImageView<'_>,
         context: &str,
+        workspace: &mut apriltag::AprilTagWorkspace,
     ) -> Result<FrameDetection> {
         let control = detection::DetectorControl::default();
-        let report = apriltag::detect_tags_with_options(image, self.options, &control)
+        let report = apriltag::detect_tags_with_workspace(image, self.options, &control, workspace)
             .with_context(|| format!("detect AprilGrid in {context}"))?;
         let refinement_failures = report.failures.len();
         let mut ignored_tags = 0;
-        let mut seen = HashSet::new();
-        let mut target_indices = Vec::new();
-        let mut image_points = Vec::new();
+        let target_tags = report.detections.len().min(self.target.base_index_by_tag.len());
+        let mut seen = HashSet::with_capacity(target_tags);
+        let mut target_indices = Vec::with_capacity(target_tags * 4);
+        let mut image_points = Vec::with_capacity(target_tags * 4);
         let mut accepted_tags = 0;
         for tag in report.detections {
             let Some(&base) = self.target.base_index_by_tag.get(&tag.id) else {

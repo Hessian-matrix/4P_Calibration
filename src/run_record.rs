@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{ErrorKind, Write};
-use std::path::{Path, PathBuf};
+use std::io::{Error, ErrorKind, Write};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -47,13 +47,17 @@ struct CorelibProvenance {
 impl CorelibProvenance {
     const fn current() -> Self {
         Self {
-            distribution: "corp_registry",
-            workspace_version: "ccl_calib=0.5.0,ccl_geometry=0.1.0,ccl_image=0.3.0,ccl_rosbag=0.4.0",
-            git_commit: "registry_index",
-            target: "cargo_host",
+            distribution: "corp_registry_with_local_ccl_image_patch",
+            workspace_version: "ccl_calib=0.6.0,ccl_geometry=0.1.0,ccl_image=0.3.0+unpublished-workspace,ccl_rosbag=0.5.0",
+            git_commit: "unpublished_worktree",
+            target: if cfg!(target_arch = "wasm32") {
+                "wasm32_browser"
+            } else {
+                "cargo_host"
+            },
             rustc_release: "cargo_toolchain",
-            artifact_sha256: "Cargo.lock",
-            profile: "cargo_registry",
+            artifact_sha256: "unrecorded; browser artifact hashes are in engine manifest",
+            profile: "cargo_local_patch",
         }
     }
 }
@@ -63,28 +67,68 @@ struct RunDirectory {
     sequence: u32,
 }
 
+enum RunStorage {
+    Native {
+        root: Mutex<RunDirectory>,
+        log: Mutex<Option<File>>,
+    },
+    Memory {
+        artifacts: Mutex<MemoryArtifacts>,
+    },
+}
+
+struct MemoryArtifacts {
+    files: BTreeMap<PathBuf, Vec<u8>>,
+    total_bytes: usize,
+}
+
+const MAX_MEMORY_ARTIFACT_BYTES: usize = 256 * 1024 * 1024;
+const MAX_MEMORY_ARTIFACTS: usize = 128;
+
 #[derive(Clone)]
 pub struct RunContext {
     stamp: String,
-    root: Arc<Mutex<RunDirectory>>,
-    log: Arc<Mutex<Option<File>>>,
+    storage: Arc<RunStorage>,
     metadata: Arc<Mutex<RunMetadata>>,
 }
 
 impl RunContext {
     pub fn create() -> Result<Self> {
-        Self::create_in(Path::new("runs"), Utc::now())
+        Self::create_in(Path::new("runs"), platform_now())
+    }
+
+    /// Creates an in-memory run without consulting a platform clock or filesystem.
+    ///
+    /// The timestamp is supplied by the browser host and is also used for the initial
+    /// log entry. Artifacts are retained up to a conservative per-run output bound.
+    pub fn memory(started_at: DateTime<Utc>) -> Result<Self> {
+        let context = Self {
+            stamp: format_run_stamp(started_at),
+            storage: Arc::new(RunStorage::Memory {
+                artifacts: Mutex::new(MemoryArtifacts {
+                    files: BTreeMap::new(),
+                    total_bytes: 0,
+                }),
+            }),
+            metadata: Arc::new(Mutex::new(new_metadata(started_at))),
+        };
+        context.persist_metadata()?;
+        context.log_at(started_at, "INFO", "run record created in memory")?;
+        Ok(context)
     }
 
     /// Create a fresh, unconfigured run beside this one without touching its
     /// results. The new run starts in the same parent directory, with its own
     /// timestamp and log; same-second runs get a numeric sequence suffix.
     pub fn next_run(&self) -> Result<Self> {
+        let RunStorage::Native { .. } = self.storage.as_ref() else {
+            anyhow::bail!("an in-memory run requires an explicit timestamp")
+        };
         let current = self.root();
         let parent = current
             .parent()
             .with_context(|| format!("{} has no parent directory", current.display()))?;
-        Self::create_in(parent, Utc::now())
+        Self::create_in(parent, platform_now())
     }
 
     fn create_in(parent: &Path, started_at: DateTime<Utc>) -> Result<Self> {
@@ -98,29 +142,27 @@ impl RunContext {
             .with_context(|| format!("create {}/run.log", path.display()))?;
         let context = Self {
             stamp,
-            root: Arc::new(Mutex::new(RunDirectory { path, sequence })),
-            log: Arc::new(Mutex::new(Some(log))),
-            metadata: Arc::new(Mutex::new(RunMetadata {
-                schema_version: 1,
-                started_at,
-                ended_at: None,
-                status: RunStatus::InProgress,
-                mode: None,
-                application_version: env!("CARGO_PKG_VERSION").to_owned(),
-                corelib: CorelibProvenance::current(),
-                error_category: None,
-                stage_duration_ms: BTreeMap::new(),
-            })),
+            storage: Arc::new(RunStorage::Native {
+                root: Mutex::new(RunDirectory { path, sequence }),
+                log: Mutex::new(Some(log)),
+            }),
+            metadata: Arc::new(Mutex::new(new_metadata(started_at))),
         };
         context.persist_metadata()?;
         context.log("INFO", "run directory created")?;
         Ok(context)
     }
 
+    /// Returns the native run directory.
+    ///
+    /// In-memory callers must use [`Self::read`], [`Self::write`], and
+    /// [`Self::take_artifacts`] instead of manufacturing filesystem paths.
     #[must_use]
     pub fn root(&self) -> PathBuf {
-        self.root
-            .lock()
+        let RunStorage::Native { root, .. } = self.storage.as_ref() else {
+            panic!("in-memory run has no filesystem root")
+        };
+        root.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .path
             .clone()
@@ -132,9 +174,12 @@ impl RunContext {
         if same_mode {
             return self.persist_metadata();
         }
+        let RunStorage::Native { root, log } = self.storage.as_ref() else {
+            self.lock_metadata()?.mode = Some(mode.to_owned());
+            return self.persist_metadata();
+        };
         let (current, mut sequence) = {
-            let directory = self
-                .root
+            let directory = root
                 .lock()
                 .map_err(|_| anyhow::anyhow!("run root lock poisoned"))?;
             (directory.path.clone(), directory.sequence)
@@ -142,8 +187,7 @@ impl RunContext {
         let parent = current
             .parent()
             .with_context(|| format!("{} has no parent directory", current.display()))?;
-        let mut log = self
-            .log
+        let mut log = log
             .lock()
             .map_err(|_| anyhow::anyhow!("run log lock poisoned"))?;
         let file = log
@@ -189,8 +233,7 @@ impl RunContext {
             };
         };
         {
-            let mut directory = self
-                .root
+            let mut directory = root
                 .lock()
                 .map_err(|_| anyhow::anyhow!("run root lock poisoned"))?;
             directory.path.clone_from(&desired);
@@ -214,36 +257,200 @@ impl RunContext {
     }
 
     pub fn snapshot_config(&self, source: &Path) -> Result<()> {
+        anyhow::ensure!(
+            matches!(self.storage.as_ref(), RunStorage::Native { .. }),
+            "snapshot_config requires native filesystem storage"
+        );
         let bytes = fs::read(source).with_context(|| format!("read {}", source.display()))?;
-        atomic_write(&self.root().join("config.yaml"), &bytes)
+        self.write(Path::new("config.yaml"), &bytes)
     }
 
     pub fn write_yaml<T: Serialize>(&self, relative: &Path, value: &T) -> Result<()> {
         let bytes = serde_yaml::to_string(value).context("serialize yaml")?;
-        atomic_write(&self.root().join(relative), bytes.as_bytes())
+        self.write(relative, bytes.as_bytes())
+    }
+
+    /// Opens a new artifact for streaming output, truncating an existing artifact.
+    pub fn create_writer(&self, relative: &Path) -> Result<Box<dyn Write>> {
+        validate_relative(relative)?;
+        match self.storage.as_ref() {
+            RunStorage::Native { .. } => {
+                let path = self.root().join(relative);
+                let parent = path
+                    .parent()
+                    .with_context(|| format!("{} has no parent", path.display()))?;
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("create {}", parent.display()))?;
+                let file = File::create(&path)
+                    .with_context(|| format!("create {}", path.display()))?;
+                Ok(Box::new(file))
+            }
+            RunStorage::Memory { artifacts } => {
+                let relative = relative.to_path_buf();
+                artifacts
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("memory artifact lock poisoned"))?
+                    .insert(relative.clone(), Vec::new())?;
+                Ok(Box::new(MemoryArtifactWriter {
+                    storage: Arc::clone(&self.storage),
+                    relative,
+                }))
+            }
+        }
+    }
+
+    /// Reads one run-relative artifact.
+    pub fn read(&self, relative: &Path) -> Result<Vec<u8>> {
+        validate_relative(relative)?;
+        match self.storage.as_ref() {
+            RunStorage::Native { .. } => {
+                let path = self.root().join(relative);
+                fs::read(&path).with_context(|| format!("read {}", path.display()))
+            }
+            RunStorage::Memory { artifacts } => artifacts
+                .lock()
+                .map_err(|_| anyhow::anyhow!("memory artifact lock poisoned"))?
+                .files
+                .get(relative)
+                .cloned()
+                .with_context(|| format!("read missing artifact {}", relative.display())),
+        }
+    }
+
+    /// Atomically replaces one run-relative artifact.
+    pub fn write(&self, relative: &Path, bytes: &[u8]) -> Result<()> {
+        validate_relative(relative)?;
+        match self.storage.as_ref() {
+            RunStorage::Native { .. } => atomic_write(&self.root().join(relative), bytes),
+            RunStorage::Memory { artifacts } => artifacts
+                .lock()
+                .map_err(|_| anyhow::anyhow!("memory artifact lock poisoned"))?
+                .replace_from_slice(relative, bytes),
+        }
+    }
+
+    /// Publishes a complete artifact directory as one operation.
+    ///
+    /// Native storage keeps the existing temporary-directory rename protocol.
+    /// Memory storage validates the complete batch before changing the artifact map.
+    pub fn publish(
+        &self,
+        relative: &Path,
+        artifacts: BTreeMap<PathBuf, Vec<u8>>,
+    ) -> Result<()> {
+        validate_relative(relative)?;
+        anyhow::ensure!(!artifacts.is_empty(), "cannot publish an empty artifact set");
+        for path in artifacts.keys() {
+            validate_relative(path)?;
+        }
+        match self.storage.as_ref() {
+            RunStorage::Native { .. } => self.publish_native(relative, artifacts),
+            RunStorage::Memory { artifacts: stored } => {
+                let mut stored = stored
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("memory artifact lock poisoned"))?;
+                anyhow::ensure!(
+                    !stored.files.keys().any(|path| path.starts_with(relative)),
+                    "artifact directory {} already exists",
+                    relative.display()
+                );
+                stored.insert_batch(relative, artifacts)
+            }
+        }
+    }
+
+    /// Removes and returns all artifacts from an in-memory run without copying bytes.
+    pub fn take_artifacts(&self) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
+        let RunStorage::Memory { artifacts } = self.storage.as_ref() else {
+            anyhow::bail!("native run artifacts remain in their run directory")
+        };
+        let mut artifacts = artifacts
+            .lock()
+            .map_err(|_| anyhow::anyhow!("memory artifact lock poisoned"))?;
+        artifacts.total_bytes = 0;
+        Ok(std::mem::take(&mut artifacts.files))
     }
 
     pub fn log(&self, level: &str, message: &str) -> Result<()> {
-        let stamp = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        self.log_at(platform_now(), level, message)
+    }
+
+    fn log_at(&self, at: DateTime<Utc>, level: &str, message: &str) -> Result<()> {
+        let stamp = at.to_rfc3339_opts(SecondsFormat::Millis, true);
         let normalized = message.replace('\n', "\\n");
-        let mut log = self
-            .log
-            .lock()
-            .map_err(|_| anyhow::anyhow!("run log lock poisoned"))?;
-        let file = log.as_mut().context("run log file is unavailable")?;
-        writeln!(file, "{stamp} {level} {normalized}").context("append run log")?;
-        file.flush().context("flush run log")
+        let line = format!("{stamp} {level} {normalized}\n");
+        match self.storage.as_ref() {
+            RunStorage::Native { log, .. } => {
+                let mut log = log
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("run log lock poisoned"))?;
+                let file = log.as_mut().context("run log file is unavailable")?;
+                file.write_all(line.as_bytes()).context("append run log")?;
+                file.flush().context("flush run log")
+            }
+            RunStorage::Memory { artifacts } => artifacts
+                .lock()
+                .map_err(|_| anyhow::anyhow!("memory artifact lock poisoned"))?
+                .append(Path::new("run.log"), line.as_bytes()),
+        }
     }
 
     pub fn finish(&self, status: RunStatus, error_category: Option<&str>) -> Result<()> {
+        self.finish_at(status, error_category, platform_now())
+    }
+
+    /// Finalizes a run at a host-supplied timestamp.
+    pub fn finish_at(
+        &self,
+        status: RunStatus,
+        error_category: Option<&str>,
+        ended_at: DateTime<Utc>,
+    ) -> Result<()> {
         {
             let mut metadata = self.lock_metadata()?;
             metadata.status = status;
-            metadata.ended_at = Some(Utc::now());
+            metadata.ended_at = Some(ended_at);
             metadata.error_category = error_category.map(str::to_owned);
         }
         self.persist_metadata()?;
-        self.log("INFO", &format!("run finalized with status {status:?}"))
+        self.log_at(
+            ended_at,
+            "INFO",
+            &format!("run finalized with status {status:?}"),
+        )
+    }
+
+    fn publish_native(
+        &self,
+        relative: &Path,
+        artifacts: BTreeMap<PathBuf, Vec<u8>>,
+    ) -> Result<()> {
+        let root = self.root();
+        let final_path = root.join(relative);
+        anyhow::ensure!(!final_path.exists(), "{} already exists", final_path.display());
+        let file_name = relative
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("non-UTF-8 artifact directory name")?;
+        let temporary = final_path.with_file_name(format!(".{file_name}.tmp"));
+        if temporary.exists() {
+            fs::remove_dir_all(&temporary)
+                .with_context(|| format!("remove stale {}", temporary.display()))?;
+        }
+        fs::create_dir(&temporary)
+            .with_context(|| format!("create {}", temporary.display()))?;
+        let result = (|| {
+            for (path, bytes) in artifacts {
+                atomic_write(&temporary.join(path), &bytes)?;
+            }
+            fs::rename(&temporary, &final_path)
+                .with_context(|| format!("publish {}", final_path.display()))?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&temporary);
+        }
+        result
     }
 
     fn lock_metadata(&self) -> Result<std::sync::MutexGuard<'_, RunMetadata>> {
@@ -257,8 +464,156 @@ impl RunContext {
             let metadata = self.lock_metadata()?;
             serde_yaml::to_string(&*metadata).context("serialize run metadata")?
         };
-        atomic_write(&self.root().join("run.yaml"), yaml.as_bytes())
+        self.write(Path::new("run.yaml"), yaml.as_bytes())
     }
+}
+
+impl MemoryArtifacts {
+    fn insert(&mut self, path: PathBuf, bytes: Vec<u8>) -> Result<()> {
+        let total_bytes = self.replacement_total(&path, bytes.len())?;
+        self.files.insert(path, bytes);
+        self.total_bytes = total_bytes;
+        Ok(())
+    }
+
+    fn replace_from_slice(&mut self, path: &Path, bytes: &[u8]) -> Result<()> {
+        let total_bytes = self.replacement_total(path, bytes.len())?;
+        let bytes = bytes.to_vec();
+        if let Some(previous) = self.files.get_mut(path) {
+            *previous = bytes;
+        } else {
+            self.files.insert(path.to_path_buf(), bytes);
+        }
+        self.total_bytes = total_bytes;
+        Ok(())
+    }
+
+    fn replacement_total(&self, path: &Path, byte_len: usize) -> Result<usize> {
+        let previous_len = self.files.get(path).map_or(0, Vec::len);
+        let artifact_count = if self.files.contains_key(path) {
+            self.files.len()
+        } else {
+            self.files.len() + 1
+        };
+        anyhow::ensure!(
+            artifact_count <= MAX_MEMORY_ARTIFACTS,
+            "memory artifact count exceeds {MAX_MEMORY_ARTIFACTS}"
+        );
+        let total_bytes = self
+            .total_bytes
+            .checked_sub(previous_len)
+            .and_then(|total| total.checked_add(byte_len))
+            .context("memory artifact size overflow")?;
+        anyhow::ensure!(
+            total_bytes <= MAX_MEMORY_ARTIFACT_BYTES,
+            "memory artifacts exceed {} bytes",
+            MAX_MEMORY_ARTIFACT_BYTES
+        );
+        Ok(total_bytes)
+    }
+
+    fn append(&mut self, path: &Path, bytes: &[u8]) -> Result<()> {
+        let total_bytes = self
+            .total_bytes
+            .checked_add(bytes.len())
+            .context("memory artifact size overflow")?;
+        anyhow::ensure!(
+            total_bytes <= MAX_MEMORY_ARTIFACT_BYTES,
+            "memory artifacts exceed {} bytes",
+            MAX_MEMORY_ARTIFACT_BYTES
+        );
+        if !self.files.contains_key(path) {
+            anyhow::ensure!(
+                self.files.len() < MAX_MEMORY_ARTIFACTS,
+                "memory artifact count exceeds {MAX_MEMORY_ARTIFACTS}"
+            );
+        }
+        self.files.entry(path.to_path_buf()).or_default().extend_from_slice(bytes);
+        self.total_bytes = total_bytes;
+        Ok(())
+    }
+
+    fn insert_batch(
+        &mut self,
+        directory: &Path,
+        artifacts: BTreeMap<PathBuf, Vec<u8>>,
+    ) -> Result<()> {
+        let added_bytes = artifacts.values().try_fold(0usize, |total, bytes| {
+            total.checked_add(bytes.len()).context("memory artifact size overflow")
+        })?;
+        let total_bytes = self
+            .total_bytes
+            .checked_add(added_bytes)
+            .context("memory artifact size overflow")?;
+        anyhow::ensure!(
+            self.files.len() + artifacts.len() <= MAX_MEMORY_ARTIFACTS,
+            "memory artifact count exceeds {MAX_MEMORY_ARTIFACTS}"
+        );
+        anyhow::ensure!(
+            total_bytes <= MAX_MEMORY_ARTIFACT_BYTES,
+            "memory artifacts exceed {} bytes",
+            MAX_MEMORY_ARTIFACT_BYTES
+        );
+        self.files.extend(
+            artifacts
+                .into_iter()
+                .map(|(path, bytes)| (directory.join(path), bytes)),
+        );
+        self.total_bytes = total_bytes;
+        Ok(())
+    }
+}
+
+struct MemoryArtifactWriter {
+    storage: Arc<RunStorage>,
+    relative: PathBuf,
+}
+
+impl Write for MemoryArtifactWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let RunStorage::Memory { artifacts } = self.storage.as_ref() else {
+            return Err(Error::other("memory artifact writer has native storage"));
+        };
+        let mut artifacts = artifacts
+            .lock()
+            .map_err(|_| Error::other("memory artifact lock poisoned"))?;
+        artifacts
+            .append(&self.relative, bytes)
+            .map_err(|error| Error::other(format!("{error:#}")))?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn validate_relative(path: &Path) -> Result<()> {
+    anyhow::ensure!(!path.as_os_str().is_empty(), "artifact path is empty");
+    anyhow::ensure!(
+        path.components().all(|component| matches!(component, Component::Normal(_))),
+        "artifact path must be normalized and relative: {}",
+        path.display()
+    );
+    Ok(())
+}
+
+fn new_metadata(started_at: DateTime<Utc>) -> RunMetadata {
+    RunMetadata {
+        schema_version: 1,
+        started_at,
+        ended_at: None,
+        status: RunStatus::InProgress,
+        mode: None,
+        application_version: env!("CARGO_PKG_VERSION").to_owned(),
+        corelib: CorelibProvenance::current(),
+        error_category: None,
+        stage_duration_ms: BTreeMap::new(),
+    }
+}
+
+fn platform_now() -> DateTime<Utc> {
+    Utc::now()
 }
 
 fn format_run_stamp(started_at: DateTime<Utc>) -> String {
@@ -496,5 +851,85 @@ mod tests {
         let metadata = read_yaml::<serde_yaml::Value>(&second_root.join("run.yaml")).unwrap();
         assert_eq!(metadata["mode"].as_str(), None);
         assert_eq!(metadata["status"].as_str(), Some("in_progress"));
+    }
+    #[test]
+    fn memory_run_preserves_streamed_and_published_artifact_contents() {
+        let started_at = fixed_started_at();
+        let run = RunContext::memory(started_at).unwrap();
+        run.set_mode("single_camera").unwrap();
+        {
+            let mut writer = run
+                .create_writer(Path::new("detection_progress.jsonl"))
+                .unwrap();
+            writer.write_all(b"{\"frames\":1}\n").unwrap();
+            writer.write_all(b"{\"frames\":2}\n").unwrap();
+            writer.flush().unwrap();
+        }
+        run.write(Path::new("trajectory.json"), br#"{"samples":[1,2]}"#)
+            .unwrap();
+        run.publish(
+            Path::new("result"),
+            BTreeMap::from([
+                (PathBuf::from("calibration.yaml"), b"mode: single_camera\n".to_vec()),
+                (PathBuf::from("trajectory.json"), br#"{"samples":[1,2]}"#.to_vec()),
+            ]),
+        )
+        .unwrap();
+        run.finish_at(RunStatus::Complete, None, started_at).unwrap();
+
+        let artifacts = run.take_artifacts().unwrap();
+        assert_eq!(
+            artifacts[Path::new("detection_progress.jsonl")],
+            b"{\"frames\":1}\n{\"frames\":2}\n"
+        );
+        assert_eq!(
+            artifacts[Path::new("result/calibration.yaml")],
+            b"mode: single_camera\n"
+        );
+        assert_eq!(
+            artifacts[Path::new("result/trajectory.json")],
+            br#"{"samples":[1,2]}"#
+        );
+        let metadata: serde_yaml::Value =
+            serde_yaml::from_slice(&artifacts[Path::new("run.yaml")]).unwrap();
+        assert_eq!(metadata["mode"].as_str(), Some("single_camera"));
+        assert_eq!(metadata["status"].as_str(), Some("complete"));
+    }
+
+    #[test]
+    fn failed_memory_publication_leaves_the_complete_result_unchanged() {
+        let started_at = fixed_started_at();
+        let run = RunContext::memory(started_at).unwrap();
+        run.publish(
+            Path::new("result"),
+            BTreeMap::from([
+                (PathBuf::from("calibration.yaml"), b"complete-result".to_vec()),
+                (PathBuf::from("summary.json"), b"complete-summary".to_vec()),
+            ]),
+        )
+        .unwrap();
+
+        let replacement = BTreeMap::from([
+            (PathBuf::from("calibration.yaml"), b"partial-replacement".to_vec()),
+            (PathBuf::from("late.json"), b"must-not-appear".to_vec()),
+        ]);
+        assert!(run.publish(Path::new("result"), replacement).is_err());
+        run.finish_at(RunStatus::Failed, Some("export"), started_at)
+            .unwrap();
+
+        let artifacts = run.take_artifacts().unwrap();
+        assert_eq!(
+            artifacts[Path::new("result/calibration.yaml")],
+            b"complete-result"
+        );
+        assert_eq!(
+            artifacts[Path::new("result/summary.json")],
+            b"complete-summary"
+        );
+        assert!(!artifacts.contains_key(Path::new("result/late.json")));
+        let metadata: serde_yaml::Value =
+            serde_yaml::from_slice(&artifacts[Path::new("run.yaml")]).unwrap();
+        assert_eq!(metadata["status"].as_str(), Some("failed"));
+        assert_eq!(metadata["error_category"].as_str(), Some("export"));
     }
 }

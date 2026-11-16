@@ -13,7 +13,7 @@ use ccl_geometry::Pose3;
 use serde::{Deserialize, Serialize};
 
 use crate::detection::DetectedView;
-use crate::run_record::{RunContext, atomic_write};
+use crate::run_record::RunContext;
 
 pub const SCHEMA_VERSION: u32 = 1;
 const VISUAL_FRAME: &str = "board";
@@ -223,8 +223,8 @@ impl Trajectory {
     pub fn write(&self, run: &RunContext) -> Result<()> {
         self.validate()?;
         let bytes = serde_json::to_vec(self).context("serialize final trajectory")?;
-        let path = run.root().join("trajectory.json");
-        atomic_write(&path, &bytes).with_context(|| format!("write {}", path.display()))
+        run.write(std::path::Path::new("trajectory.json"), &bytes)
+            .context("write trajectory.json")
     }
 
     fn validate(&self) -> Result<()> {

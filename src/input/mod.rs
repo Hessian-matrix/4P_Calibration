@@ -1,18 +1,26 @@
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex, mpsc};
+use std::io::Cursor;
+use std::sync::Arc;
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+use std::sync::{Mutex, mpsc};
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use web_time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, ensure};
 use ccl_calib::camera::inertial::ImuSample;
 use ccl_calib::camera::{CalibrationImageSize, SampleTime};
 use ccl_image::{Gray8View, detection};
+use image::ImageDecoder;
 use ccl_rosbag::schema::Projection;
 use ccl_rosbag::{
-    BagReader, CompiledSchema, ImageAdapter, MessageFilter, MessageSchema, OpenOptions,
+    BagReader, CompiledSchema, ImageAdapter, MessageFilter, MessageSchema,
     SchemaEncoding, SchemaSource, StaticSchemaRegistry, TopicId, ValueRef, Visit,
 };
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_arch = "wasm32"))]
+use ccl_rosbag::OpenOptions;
 
 use crate::config::{
     BagSourceConfig, CalibrationConfig, CameraConfig, CameraTimestampReference, RunSettings,
@@ -22,6 +30,8 @@ use crate::detection::{
     FrameDetector,
 };
 
+mod performance;
+pub use performance::PipelinePerformance;
 const RAW_IMAGE_TYPE: &str = "sensor_msgs/Image";
 const COMPRESSED_IMAGE_TYPE: &str = "sensor_msgs/CompressedImage";
 const STRING_TYPE: &str = "std_msgs/String";
@@ -100,6 +110,25 @@ pub struct InputSummary {
     pub imu_sample_count: usize,
     pub imu_first_timestamp_ns: Option<i64>,
     pub imu_last_timestamp_ns: Option<i64>,
+    pub performance: PipelinePerformance,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DetectionPreview {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+    pub corners: Vec<[f64; 2]>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LatestImu {
+    pub sample_count: usize,
+    pub timestamp_ns: i64,
+    pub gyro_rad_s: [f64; 3],
+    pub specific_force_m_s2: [f64; 3],
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -113,6 +142,16 @@ pub struct DetectionProgress {
     pub frames_per_second: f64,
     pub average_frames_per_second: f64,
     pub workers: usize,
+    /// Sum of worker decode/grayscale time; overlaps across parallel workers.
+    pub decode_grayscale_worker_ms: f64,
+    /// Sum of worker detection time; not additive to pipeline wall time.
+    pub detection_worker_ms: f64,
+    /// Browser-only sampled grayscale frame; absent from unsampled and native progress.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<DetectionPreview>,
+    /// Latest real IMU sample observed by the input visitor when this frame completed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_imu: Option<LatestImu>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -130,9 +169,16 @@ struct TopicStats {
     status: String,
 }
 
+fn open_bag(source: &BagSourceConfig) -> Result<Box<dyn BagReader>> {
+    #[cfg(not(target_arch = "wasm32"))]
+    let bag = ccl_rosbag::open(&source.path, OpenOptions::new(source.format.core()));
+    #[cfg(target_arch = "wasm32")]
+    let bag = crate::browser::open_bag(source);
+    bag.with_context(|| format!("open bag {}", source.path.display()))
+}
+
 pub fn inspect(source: &BagSourceConfig) -> Result<BagInspection> {
-    let bag = ccl_rosbag::open(&source.path, OpenOptions::new(source.format.core()))
-        .with_context(|| format!("open bag {}", source.path.display()))?;
+    let bag = open_bag(source)?;
     let registry = standard_schema_registry();
     let candidates = bag
         .topics()
@@ -256,31 +302,125 @@ enum DetectionImage {
     Compressed(Vec<u8>),
 }
 
+impl DetectionImage {
+    fn into_buffer(self) -> Vec<u8> {
+        match self {
+            Self::Gray8 { pixels, .. } | Self::Compressed(pixels) => pixels,
+        }
+    }
+}
+
 struct DetectionTask {
     camera_index: usize,
     timestamp_ns: i64,
     ordinal: u64,
     context: String,
     image: DetectionImage,
+    preview_requested: bool,
 }
 
 struct DetectionCompletion {
     camera_index: usize,
     timestamp_ns: i64,
     ordinal: u64,
-    result: Result<(CalibrationImageSize, FrameDetection)>,
+    result: Result<(
+        CalibrationImageSize,
+        FrameDetection,
+        Option<DetectionPreview>,
+    )>,
+    decode_grayscale: Duration,
+    detection: Duration,
+    input_buffer: Vec<u8>,
+    worker_wait: Duration,
+    completed_at: Instant,
+    preview_time: Duration,
+    core: ccl_image::apriltag::AprilTagWorkspaceStats,
+    retained_bytes: usize,
 }
 
+#[derive(Default)]
+struct DetectionBuffers {
+    decoded: Vec<u8>,
+    gray: Vec<u8>,
+}
+
+struct InputBufferCache {
+    buffers: RefCell<Vec<Vec<u8>>>,
+    max_cached: usize,
+}
+
+impl InputBufferCache {
+    fn new(max_cached: usize) -> Self {
+        Self {
+            buffers: RefCell::new(Vec::with_capacity(max_cached)),
+            max_cached,
+        }
+    }
+
+    fn take(&self, required_capacity: usize) -> Vec<u8> {
+        let mut buffers = self.buffers.borrow_mut();
+        let index = buffers
+            .iter()
+            .rposition(|buffer| buffer.capacity() >= required_capacity)
+            .or_else(|| {
+                buffers
+                    .iter()
+                    .enumerate()
+                    .max_by_key(|(_, buffer)| buffer.capacity())
+                    .map(|(index, _)| index)
+            });
+        let mut buffer = index.map_or_else(Vec::new, |index| buffers.swap_remove(index));
+        drop(buffers);
+        buffer.clear();
+        if buffer.capacity() < required_capacity {
+            buffer.reserve(required_capacity);
+        }
+        buffer
+    }
+
+    fn recycle(&self, mut buffer: Vec<u8>) {
+        buffer.clear();
+        let mut buffers = self.buffers.borrow_mut();
+        if buffers.len() < self.max_cached {
+            buffers.push(buffer);
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+type DetectionWorker = JoinHandle<()>;
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+type DetectionWorker = mpsc::Receiver<()>;
+
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+fn spawn_detection_worker(task: impl FnOnce() + Send + 'static) -> DetectionWorker {
+    #[cfg(not(target_arch = "wasm32"))]
+    { thread::spawn(task) }
+    #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+    {
+        let (sender, receiver) = mpsc::channel();
+        rayon::spawn(move || { task(); let _ = sender.send(()); });
+        receiver
+    }
+}
+
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
 struct DetectionPool {
     sender: Option<mpsc::SyncSender<DetectionTask>>,
     receiver: mpsc::Receiver<DetectionCompletion>,
-    handles: Vec<JoinHandle<()>>,
+    handles: Vec<DetectionWorker>,
+    input_buffers: InputBufferCache,
     workers: usize,
 }
 
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
 impl DetectionPool {
     fn new(detector: &FrameDetector) -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
         let workers = thread::available_parallelism().map_or(1, std::num::NonZero::get);
+        #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+        let workers = rayon::current_num_threads();
         let (task_sender, task_receiver) = mpsc::sync_channel(workers.saturating_mul(2));
         let (result_sender, result_receiver) = mpsc::channel();
         let task_receiver = Arc::new(Mutex::new(task_receiver));
@@ -289,8 +429,11 @@ impl DetectionPool {
                 let tasks = Arc::clone(&task_receiver);
                 let results = result_sender.clone();
                 let detector = detector.clone();
-                thread::spawn(move || {
+                spawn_detection_worker(move || {
+                    let mut buffers = DetectionBuffers::default();
+                    let mut workspace = ccl_image::apriltag::AprilTagWorkspace::default();
                     loop {
+                        let waiting = Instant::now();
                         let task = {
                             let receiver = tasks
                                 .lock()
@@ -298,7 +441,9 @@ impl DetectionPool {
                             receiver.recv()
                         };
                         let Ok(task) = task else { break };
-                        let completion = process_detection_task(&detector, task);
+                        let waited = waiting.elapsed();
+                        let mut completion = process_detection_task(&detector, task, &mut buffers, &mut workspace);
+                        completion.worker_wait = waited;
                         if results.send(completion).is_err() {
                             break;
                         }
@@ -311,122 +456,484 @@ impl DetectionPool {
             sender: Some(task_sender),
             receiver: result_receiver,
             handles,
+            input_buffers: InputBufferCache::new(workers.saturating_mul(3)),
             workers,
         }
     }
 
+    fn copy_input(&self, bytes: &[u8]) -> Vec<u8> {
+        let mut buffer = self.input_buffers.take(bytes.len());
+        buffer.extend_from_slice(bytes);
+        buffer
+    }
+
+    fn recycle_completion(&self, completion: &mut DetectionCompletion) {
+        self.input_buffers
+            .recycle(std::mem::take(&mut completion.input_buffer));
+    }
+
     fn submit(&self, task: DetectionTask) -> Result<()> {
-        self.sender
-            .as_ref()
-            .context("detection pool is closed")?
-            .send(task)
-            .map_err(|_| anyhow!("detection worker pool stopped"))
+        let sender = self.sender.as_ref().context("detection pool is closed")?;
+        sender.send(task).map_err(|error| {
+            self.input_buffers.recycle(error.0.image.into_buffer());
+            anyhow!("detection worker pool stopped")
+        })
     }
 
     fn try_recv(&self) -> Option<DetectionCompletion> {
         self.receiver.try_recv().ok()
     }
 
-    fn finish(mut self) -> Result<Vec<DetectionCompletion>> {
+    fn finish(&mut self) -> Result<Vec<DetectionCompletion>> {
         self.sender.take();
+        let mut worker_error = None;
         for handle in self.handles.drain(..) {
-            handle
-                .join()
-                .map_err(|_| anyhow!("detection worker panicked"))?;
+            #[cfg(not(target_arch = "wasm32"))]
+            let stopped = handle.join().is_err();
+            #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
+            let stopped = handle.recv().is_err();
+            if stopped && worker_error.is_none() {
+                worker_error = Some(anyhow!("detection worker stopped unexpectedly"));
+            }
         }
-        Ok(self.receiver.into_iter().collect())
+        if let Some(error) = worker_error {
+            return Err(error);
+        }
+        Ok(self.receiver.try_iter().collect())
     }
 }
 
-fn process_detection_task(detector: &FrameDetector, task: DetectionTask) -> DetectionCompletion {
+#[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+struct DetectionPool {
+    detector: FrameDetector,
+    completion: RefCell<Option<DetectionCompletion>>,
+    buffers: RefCell<DetectionBuffers>,
+    workspace: RefCell<ccl_image::apriltag::AprilTagWorkspace>,
+    input_buffers: InputBufferCache,
+    workers: usize,
+}
+
+#[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+impl DetectionPool {
+    fn new(detector: &FrameDetector) -> Self {
+        Self {
+            detector: detector.clone(),
+            completion: RefCell::new(None),
+            buffers: RefCell::new(DetectionBuffers::default()),
+            workspace: RefCell::new(ccl_image::apriltag::AprilTagWorkspace::default()),
+            input_buffers: InputBufferCache::new(3),
+            workers: 1,
+        }
+    }
+
+    fn copy_input(&self, bytes: &[u8]) -> Vec<u8> {
+        let mut buffer = self.input_buffers.take(bytes.len());
+        buffer.extend_from_slice(bytes);
+        buffer
+    }
+
+    fn recycle_completion(&self, completion: &mut DetectionCompletion) {
+        self.input_buffers
+            .recycle(std::mem::take(&mut completion.input_buffer));
+    }
+
+    fn submit(&self, task: DetectionTask) -> Result<()> {
+        if self.completion.borrow().is_some() {
+            self.input_buffers.recycle(task.image.into_buffer());
+            return Err(anyhow!("previous detection result was not consumed"));
+        }
+        let completion = process_detection_task(
+            &self.detector,
+            task,
+            &mut self.buffers.borrow_mut(),
+            &mut self.workspace.borrow_mut(),
+        );
+        *self.completion.borrow_mut() = Some(completion);
+        Ok(())
+    }
+
+    fn try_recv(&self) -> Option<DetectionCompletion> {
+        self.completion.borrow_mut().take()
+    }
+
+    fn finish(&mut self) -> Result<Vec<DetectionCompletion>> {
+        Ok(self.completion.borrow_mut().take().into_iter().collect())
+    }
+}
+
+fn process_detection_task(
+    detector: &FrameDetector,
+    task: DetectionTask,
+    buffers: &mut DetectionBuffers,
+    workspace: &mut ccl_image::apriltag::AprilTagWorkspace,
+) -> DetectionCompletion {
     let DetectionTask {
         camera_index,
         timestamp_ns,
         ordinal,
         context,
-        image,
+        mut image,
+        preview_requested,
     } = task;
+    let mut decode_grayscale = Duration::ZERO;
+    let mut detection = Duration::ZERO;
+    let mut preview_time = Duration::ZERO;
     let result = (|| {
-        let image = match image {
+        let decode_started = Instant::now();
+        let (width, height, pixels) = match &mut image {
             DetectionImage::Gray8 {
                 width,
                 height,
                 pixels,
-            } => image::GrayImage::from_raw(width, height, pixels)
-                .context("invalid owned gray image")?,
-            DetectionImage::Compressed(bytes) => image::load_from_memory(&bytes)
-                .with_context(|| format!("decode compressed image {context}"))?
-                .into_luma8(),
+            } => (*width, *height, pixels.as_slice()),
+            DetectionImage::Compressed(bytes) => {
+                let decoded = decode_compressed_gray(bytes, buffers)
+                    .with_context(|| format!("decode compressed image {context}"))?;
+                (decoded.width, decoded.height, decoded.pixels)
+            }
         };
-        let size = CalibrationImageSize::new(image.width(), image.height())?;
-        let view = Gray8View::new(
-            image.width(),
-            image.height(),
-            image.width() as usize,
-            image.as_raw(),
-        )?;
+        decode_grayscale = decode_started.elapsed();
+        let size = CalibrationImageSize::new(width, height)?;
+        let view = Gray8View::new(width, height, width as usize, pixels)?;
+        let detection_started = Instant::now();
         let detected = detector.detect(
             camera_index,
             size,
             detection::ImageView::Gray8(view),
             &context,
+            workspace,
         )?;
-        Ok((size, detected))
+        detection = detection_started.elapsed();
+        let preview_started = Instant::now();
+        #[cfg(target_arch = "wasm32")]
+        let preview = preview_requested
+            .then(|| detection_preview(width, height, pixels, detected.frame.as_ref()));
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = preview_requested;
+        #[cfg(not(target_arch = "wasm32"))]
+        let preview: Option<DetectionPreview> = None;
+        preview_time = preview_started.elapsed();
+        Ok((size, detected, preview))
     })();
     DetectionCompletion {
         camera_index,
         timestamp_ns,
         ordinal,
         result,
+        decode_grayscale,
+        detection,
+        input_buffer: image.into_buffer(),
+        worker_wait: Duration::ZERO,
+        completed_at: Instant::now(),
+        preview_time,
+        core: workspace.stats(),
+        retained_bytes: workspace.stats().retained_bytes + buffers.decoded.capacity() + buffers.gray.capacity(),
     }
 }
 
-fn owned_gray(image: ccl_rosbag::ImageView<'_>) -> DetectionImage {
-    let (width, height, pixels) = match image {
+struct DecodedGray<'a> {
+    width: u32,
+    height: u32,
+    pixels: &'a [u8],
+}
+
+fn decode_compressed_gray<'a>(
+    bytes: &[u8],
+    buffers: &'a mut DetectionBuffers,
+) -> Result<DecodedGray<'a>> {
+    let reader = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+    let mut decoder = reader.into_decoder()?;
+    let (width, height) = decoder.dimensions();
+    let color = decoder.color_type();
+    let total_bytes = decoder.total_bytes();
+    let mut limits = image::Limits::default();
+    limits.reserve(total_bytes)?;
+    decoder.set_limits(limits)?;
+    let total_bytes = usize::try_from(total_bytes)
+        .context("decoded image is too large for this platform")?;
+
+    let DetectionBuffers { decoded, gray } = buffers;
+    decoded.resize(total_bytes, 0);
+    decoder.read_image(decoded)?;
+    if color == image::ColorType::L8 {
+        return Ok(DecodedGray {
+            width,
+            height,
+            pixels: decoded,
+        });
+    }
+    decoded_pixels_to_gray(color, decoded, gray)?;
+    Ok(DecodedGray {
+        width,
+        height,
+        pixels: gray,
+    })
+}
+
+fn decoded_pixels_to_gray(
+    color: image::ColorType,
+    decoded: &[u8],
+    gray: &mut Vec<u8>,
+) -> Result<()> {
+    let bytes_per_pixel = usize::from(color.bytes_per_pixel());
+    ensure!(
+        decoded.len().is_multiple_of(bytes_per_pixel),
+        "decoded image byte count does not match {color:?}"
+    );
+    let pixel_count = decoded.len() / bytes_per_pixel;
+    gray.resize(pixel_count, 0);
+    match color {
+        image::ColorType::L8 => gray.copy_from_slice(decoded),
+        image::ColorType::La8 => {
+            for (source, output) in decoded.chunks_exact(2).zip(gray.iter_mut()) {
+                *output = source[0];
+            }
+        }
+        image::ColorType::Rgb8 => {
+            for (source, output) in decoded.chunks_exact(3).zip(gray.iter_mut()) {
+                *output = image_luma8(
+                    f32::from(source[0]) * (1.0 / 255.0),
+                    f32::from(source[1]) * (1.0 / 255.0),
+                    f32::from(source[2]) * (1.0 / 255.0),
+                );
+            }
+        }
+        image::ColorType::Rgba8 => {
+            for (source, output) in decoded.chunks_exact(4).zip(gray.iter_mut()) {
+                *output = image_luma8(
+                    f32::from(source[0]) * (1.0 / 255.0),
+                    f32::from(source[1]) * (1.0 / 255.0),
+                    f32::from(source[2]) * (1.0 / 255.0),
+                );
+            }
+        }
+        image::ColorType::L16 => {
+            for (source, output) in decoded.chunks_exact(2).zip(gray.iter_mut()) {
+                *output = narrow_luma16(u16::from_ne_bytes([source[0], source[1]]));
+            }
+        }
+        image::ColorType::La16 => {
+            for (source, output) in decoded.chunks_exact(4).zip(gray.iter_mut()) {
+                *output = narrow_luma16(u16::from_ne_bytes([source[0], source[1]]));
+            }
+        }
+        image::ColorType::Rgb16 => {
+            for (source, output) in decoded.chunks_exact(6).zip(gray.iter_mut()) {
+                *output = image_luma8(
+                    f32::from(u16::from_ne_bytes([source[0], source[1]])) * (1.0 / 65535.0),
+                    f32::from(u16::from_ne_bytes([source[2], source[3]])) * (1.0 / 65535.0),
+                    f32::from(u16::from_ne_bytes([source[4], source[5]])) * (1.0 / 65535.0),
+                );
+            }
+        }
+        image::ColorType::Rgba16 => {
+            for (source, output) in decoded.chunks_exact(8).zip(gray.iter_mut()) {
+                *output = image_luma8(
+                    f32::from(u16::from_ne_bytes([source[0], source[1]])) * (1.0 / 65535.0),
+                    f32::from(u16::from_ne_bytes([source[2], source[3]])) * (1.0 / 65535.0),
+                    f32::from(u16::from_ne_bytes([source[4], source[5]])) * (1.0 / 65535.0),
+                );
+            }
+        }
+        image::ColorType::Rgb32F => {
+            for (source, output) in decoded.chunks_exact(12).zip(gray.iter_mut()) {
+                *output = image_luma8(
+                    f32::from_ne_bytes(source[0..4].try_into().expect("four-byte red")),
+                    f32::from_ne_bytes(source[4..8].try_into().expect("four-byte green")),
+                    f32::from_ne_bytes(source[8..12].try_into().expect("four-byte blue")),
+                );
+            }
+        }
+        image::ColorType::Rgba32F => {
+            for (source, output) in decoded.chunks_exact(16).zip(gray.iter_mut()) {
+                *output = image_luma8(
+                    f32::from_ne_bytes(source[0..4].try_into().expect("four-byte red")),
+                    f32::from_ne_bytes(source[4..8].try_into().expect("four-byte green")),
+                    f32::from_ne_bytes(source[8..12].try_into().expect("four-byte blue")),
+                );
+            }
+        }
+        _ => return Err(anyhow!("unsupported decoded color type {color:?}")),
+    }
+    Ok(())
+}
+
+fn narrow_luma16(value: u16) -> u8 {
+    u8::try_from((u32::from(value) + 128) / 257).expect("normalized luma16 is bounded")
+}
+
+fn image_luma8(red: f32, green: f32, blue: f32) -> u8 {
+    // `DynamicImage::into_luma8` derives this BT.709 row from image's sRGB primaries.
+    // Keep the same f32 operation order and target-dependent FMA choice as image 0.25.
+    const COEFFICIENTS: [f32; 3] = [0.212_647_84, 0.715_179_2, 0.072_173_04];
+    let mut luma = 0.0;
+    luma = image_multiply_accumulate(luma, red, COEFFICIENTS[0]);
+    luma = image_multiply_accumulate(luma, green, COEFFICIENTS[1]);
+    luma = image_multiply_accumulate(luma, blue, COEFFICIENTS[2]);
+    (luma * 255.0).round() as u8
+}
+
+#[cfg(any(
+    all(any(target_arch = "x86", target_arch = "x86_64"), target_feature = "fma"),
+    all(target_arch = "aarch64", target_feature = "neon")
+))]
+fn image_multiply_accumulate(accumulator: f32, value: f32, coefficient: f32) -> f32 {
+    value.mul_add(coefficient, accumulator)
+}
+
+#[cfg(not(any(
+    all(any(target_arch = "x86", target_arch = "x86_64"), target_feature = "fma"),
+    all(target_arch = "aarch64", target_feature = "neon")
+)))]
+fn image_multiply_accumulate(accumulator: f32, value: f32, coefficient: f32) -> f32 {
+    accumulator + value * coefficient
+}
+
+#[cfg(target_arch = "wasm32")]
+fn detection_preview(
+    source_width: u32,
+    source_height: u32,
+    source_pixels: &[u8],
+    detected: Option<&DetectedFrame>,
+) -> DetectionPreview {
+    const MAX_WIDTH: u32 = 320;
+    const MAX_HEIGHT: u32 = 240;
+    let (width, height) = if source_width <= MAX_WIDTH && source_height <= MAX_HEIGHT {
+        (source_width, source_height)
+    } else if u64::from(source_width) * u64::from(MAX_HEIGHT)
+        >= u64::from(source_height) * u64::from(MAX_WIDTH)
+    {
+        (
+            MAX_WIDTH,
+            u32::try_from(
+                (u64::from(source_height) * u64::from(MAX_WIDTH))
+                    / u64::from(source_width),
+            )
+            .unwrap_or(MAX_HEIGHT)
+            .max(1),
+        )
+    } else {
+        (
+            u32::try_from(
+                (u64::from(source_width) * u64::from(MAX_HEIGHT))
+                    / u64::from(source_height),
+            )
+            .unwrap_or(MAX_WIDTH)
+            .max(1),
+            MAX_HEIGHT,
+        )
+    };
+    let mut pixels = Vec::with_capacity(width as usize * height as usize);
+    for y in 0..height {
+        let source_y = u32::try_from(
+            u64::from(y) * u64::from(source_height) / u64::from(height),
+        )
+        .expect("preview source y is bounded");
+        for x in 0..width {
+            let source_x = u32::try_from(
+                u64::from(x) * u64::from(source_width) / u64::from(width),
+            )
+            .expect("preview source x is bounded");
+            pixels.push(
+                source_pixels[source_y as usize * source_width as usize + source_x as usize],
+            );
+        }
+    }
+    let scale_x = f64::from(width) / f64::from(source_width);
+    let scale_y = f64::from(height) / f64::from(source_height);
+    let corners = detected.map_or_else(Vec::new, |frame| {
+        frame
+            .pixels
+            .iter()
+            .map(|point| [point[0] * scale_x, point[1] * scale_y])
+            .collect()
+    });
+    DetectionPreview {
+        width,
+        height,
+        pixels,
+        corners,
+    }
+}
+
+fn owned_gray(
+    image: ccl_rosbag::ImageView<'_>,
+    mut pixels: Vec<u8>,
+) -> Result<DetectionImage> {
+    pixels.clear();
+    let (width, height) = match image {
         ccl_rosbag::ImageView::Gray8(view) => {
             let (width, height) = (view.width(), view.height());
-            let mut pixels = Vec::with_capacity(width as usize * height as usize);
+            pixels.reserve(width as usize * height as usize);
             for y in 0..height {
                 pixels.extend_from_slice(view.row(y).expect("validated image row"));
             }
-            (width, height, pixels)
+            (width, height)
         }
         ccl_rosbag::ImageView::Gray16Le(view) => {
             let (width, height) = (view.width(), view.height());
-            let mut pixels = Vec::with_capacity(width as usize * height as usize);
+            pixels.reserve(width as usize * height as usize);
             for y in 0..height {
                 for x in 0..width {
                     let value = view.sample(x, y).expect("validated image coordinate");
-                    pixels.push(
-                        u8::try_from((u32::from(value) + 128) / 257)
-                            .expect("normalized gray16 is bounded"),
-                    );
+                    pixels.push(narrow_luma16(value));
                 }
             }
-            (width, height, pixels)
+            (width, height)
         }
         ccl_rosbag::ImageView::Rgba8(view) => {
             let (width, height) = (view.width(), view.height());
-            let mut pixels = Vec::with_capacity(width as usize * height as usize);
-            for y in 0..height {
-                for x in 0..width {
-                    let [r, g, b, _] = view.pixel(x, y).expect("validated image coordinate");
+            pixels.reserve(width as usize * height as usize);
+            let row_bytes = width as usize * 4;
+            for row in view.pixels().chunks_exact(view.stride()).take(height as usize) {
+                for pixel in row[..row_bytes].chunks_exact(4) {
                     pixels.push(
                         u8::try_from(
-                            (54 * u32::from(r) + 183 * u32::from(g) + 19 * u32::from(b) + 128)
+                            (54 * u32::from(pixel[0])
+                                + 183 * u32::from(pixel[1])
+                                + 19 * u32::from(pixel[2])
+                                + 128)
                                 / 256,
                         )
                         .expect("normalized RGBA luminance is bounded"),
                     );
                 }
             }
-            (width, height, pixels)
+            (width, height)
         }
     };
-    DetectionImage::Gray8 {
+    Ok(DetectionImage::Gray8 {
         width,
         height,
         pixels,
+    })
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+const PREVIEW_INTERVAL: Duration = Duration::from_millis(250);
+
+#[cfg(any(target_arch = "wasm32", test))]
+struct PreviewSampler {
+    last_sampled: Vec<Option<Duration>>,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl PreviewSampler {
+    fn new(camera_count: usize) -> Self {
+        Self {
+            last_sampled: vec![None; camera_count],
+        }
+    }
+
+    fn should_sample(&mut self, camera_index: usize, elapsed: Duration) -> bool {
+        let last_sampled = &mut self.last_sampled[camera_index];
+        let due = last_sampled.is_none_or(|previous| {
+            elapsed.saturating_sub(previous) >= PREVIEW_INTERVAL
+        });
+        if due {
+            *last_sampled = Some(elapsed);
+        }
+        due
     }
 }
 
@@ -437,6 +944,9 @@ struct DetectionRate {
     total_frames: usize,
     current_fps: f64,
     frames_by_camera: Vec<usize>,
+    decode_grayscale: Duration,
+    detection: Duration,
+    performance: PipelinePerformance,
 }
 
 impl DetectionRate {
@@ -449,6 +959,9 @@ impl DetectionRate {
             total_frames: 0,
             current_fps: 0.0,
             frames_by_camera: vec![0; camera_count],
+            decode_grayscale: Duration::ZERO,
+            detection: Duration::ZERO,
+            performance: PipelinePerformance::default(),
         }
     }
 
@@ -482,9 +995,26 @@ fn collect_detection(
     image_sizes: &mut [Option<CalibrationImageSize>],
     rate: &mut DetectionRate,
     workers: usize,
+    latest_imu: Option<LatestImu>,
     event: &mut dyn FnMut(DetectionProgress),
 ) -> Result<()> {
-    let (size, detected) = completion.result?;
+    let (size, detected, preview) = completion.result?;
+    rate.decode_grayscale += completion.decode_grayscale;
+    rate.detection += completion.detection;
+    let performance = &mut rate.performance;
+    performance.worker_wait_ms += completion.worker_wait.as_secs_f64() * 1000.0;
+    let lag_ms = completion.completed_at.elapsed().as_secs_f64() * 1000.0;
+    performance.completion_lag_ms += lag_ms;
+    performance.completion_lag_max_ms = performance.completion_lag_max_ms.max(lag_ms);
+    performance.decode_grayscale_worker_ms += completion.decode_grayscale.as_secs_f64() * 1000.0;
+    performance.detection_worker_ms += completion.detection.as_secs_f64() * 1000.0;
+    performance.preview_worker_ms += completion.preview_time.as_secs_f64() * 1000.0;
+    if let Some(preview) = &preview {
+        performance.preview_count += 1;
+        performance.preview_bytes += preview.pixels.len() as u64;
+    }
+    performance.max_worker_retained_bytes = performance.max_worker_retained_bytes.max(completion.retained_bytes);
+    performance.core_worker_ms.record(&completion.core);
     update_image_size(
         &mut image_sizes[completion.camera_index],
         size,
@@ -509,6 +1039,10 @@ fn collect_detection(
         frames_per_second,
         average_frames_per_second,
         workers,
+        decode_grayscale_worker_ms: rate.decode_grayscale.as_secs_f64() * 1000.0,
+        detection_worker_ms: rate.detection.as_secs_f64() * 1000.0,
+        preview,
+        latest_imu,
     });
     Ok(())
 }
@@ -645,12 +1179,10 @@ pub fn load_and_detect(
     cancelled: &dyn Fn() -> bool,
     event: &mut dyn FnMut(DetectionProgress),
 ) -> Result<(DetectedDataset, InputSummary, DetectionSummary)> {
+    let pipeline_started = Instant::now();
     settings.validate()?;
-    let bag = ccl_rosbag::open(
-        &settings.source.path,
-        OpenOptions::new(settings.source.format.core()),
-    )
-    .with_context(|| format!("open bag {}", settings.source.path.display()))?;
+    let bag = open_bag(&settings.source)?;
+    let open_time = pipeline_started.elapsed();
     let mut selected_topics = Vec::with_capacity(settings.cameras.len() + 1);
     for camera in &settings.cameras {
         let topic = bag
@@ -721,10 +1253,18 @@ pub fn load_and_detect(
         ..MessageFilter::default()
     };
     let detector = FrameDetector::new(settings);
-    let pool = DetectionPool::new(&detector);
+    let mut pool = DetectionPool::new(&detector);
     let workers = pool.workers;
     let mut stats = DetectionStats::new(settings);
     let mut rate = DetectionRate::new(settings.cameras.len());
+    rate.performance.workers = workers;
+    rate.performance.open_ms = open_time.as_secs_f64() * 1000.0;
+    #[cfg(target_arch = "wasm32")]
+    let preview_started = Instant::now();
+    #[cfg(target_arch = "wasm32")]
+    let preview_enabled = crate::browser::preview_enabled();
+    #[cfg(target_arch = "wasm32")]
+    let mut preview_sampler = PreviewSampler::new(settings.cameras.len());
     let mut frames_by_camera = (0..settings.cameras.len())
         .map(|_| Vec::new())
         .collect::<Vec<Vec<RawDetectedFrame>>>();
@@ -732,7 +1272,14 @@ pub fn load_and_detect(
     let mut imu_rows = Vec::new();
     let mut processing_error = None;
     let mut ordinal = 0_u64;
+    let mut submitted_by_camera = vec![0_usize; settings.cameras.len()];
+    let mut latest_imu = None;
+    #[cfg(target_arch = "wasm32")]
+    let mut last_imu_event_at: Option<Instant> = None;
+    #[cfg(target_arch = "wasm32")]
+    let mut last_imu_event_count = 0_usize;
 
+    let visit_started = Instant::now();
     let visit_result = bag.visit(&filter, &mut |raw| {
         if cancelled() {
             processing_error = Some(anyhow!("calibration cancelled"));
@@ -750,32 +1297,40 @@ pub fn load_and_detect(
                     "{} at header={}",
                     settings.cameras[camera_index].topic, timestamp_ns
                 );
+                let prepare_started = Instant::now();
                 let image = match &image_bindings[camera_index] {
-                    ImageBinding::Raw(adapter) => owned_gray(adapter.to_view(&message)?),
-                    ImageBinding::Compressed(projection) => {
-                        DetectionImage::Compressed(projected_bytes(&message, projection)?.to_vec())
-                    }
+                    ImageBinding::Raw(adapter) => owned_gray(
+                        adapter.to_view(&message)?,
+                        pool.copy_input(&[]),
+                    )?,
+                    ImageBinding::Compressed(projection) => DetectionImage::Compressed(
+                        pool.copy_input(projected_bytes(&message, projection)?),
+                    ),
                 };
+                rate.performance.input_prepare_ms += prepare_started.elapsed().as_secs_f64() * 1000.0;
+                rate.performance.input_payload_bytes += match &image {
+                    DetectionImage::Compressed(bytes) | DetectionImage::Gray8 { pixels: bytes, .. } => bytes.len() as u64,
+                };
+                let submitted = submitted_by_camera[camera_index];
+                submitted_by_camera[camera_index] = submitted
+                    .checked_add(1)
+                    .context("camera frame count overflow")?;
+                #[cfg(target_arch = "wasm32")]
+                let preview_requested = preview_enabled &&
+                    preview_sampler.should_sample(camera_index, preview_started.elapsed());
+                #[cfg(not(target_arch = "wasm32"))]
+                let preview_requested = false;
+                let submit_started = Instant::now();
                 pool.submit(DetectionTask {
                     camera_index,
                     timestamp_ns,
                     ordinal,
                     context,
                     image,
+                    preview_requested,
                 })?;
+                rate.performance.submit_ms += submit_started.elapsed().as_secs_f64() * 1000.0;
                 ordinal = ordinal.checked_add(1).context("frame ordinal overflow")?;
-                while let Some(completion) = pool.try_recv() {
-                    collect_detection(
-                        completion,
-                        settings,
-                        &mut stats,
-                        &mut frames_by_camera,
-                        &mut image_sizes,
-                        &mut rate,
-                        workers,
-                        event,
-                    )?;
-                }
             } else {
                 let binding = imu_binding.as_ref().context("missing IMU binding")?;
                 let (gyro_rad_s, specific_force_m_s2) = binding.read(&message)?;
@@ -784,6 +1339,38 @@ pub fn load_and_detect(
                     gyro_rad_s,
                     specific_force_m_s2,
                 });
+                let progress = LatestImu {
+                    sample_count: imu_rows.len(),
+                    timestamp_ns,
+                    gyro_rad_s,
+                    specific_force_m_s2,
+                };
+                latest_imu = Some(progress);
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let now = Instant::now();
+                    if last_imu_event_at.map_or(true, |previous| {
+                        now.duration_since(previous) >= Duration::from_millis(100)
+                    }) {
+                        crate::browser::emit_imu_progress(progress)?;
+                        last_imu_event_at = Some(now);
+                        last_imu_event_count = imu_rows.len();
+                    }
+                }
+            }
+            while let Some(mut completion) = pool.try_recv() {
+                pool.recycle_completion(&mut completion);
+                collect_detection(
+                    completion,
+                    settings,
+                    &mut stats,
+                    &mut frames_by_camera,
+                    &mut image_sizes,
+                    &mut rate,
+                    workers,
+                    latest_imu,
+                    event,
+                )?;
             }
             Ok(())
         })();
@@ -793,8 +1380,21 @@ pub fn load_and_detect(
         }
         Ok(Visit::Continue)
     });
-    let remaining = pool.finish()?;
+    rate.performance.visit_ms = visit_started.elapsed().as_secs_f64() * 1000.0;
+    let finish_started = Instant::now();
+    let mut remaining = pool.finish()?;
+    for completion in &mut remaining {
+        pool.recycle_completion(completion);
+    }
+    rate.performance.finish_ms = finish_started.elapsed().as_secs_f64() * 1000.0;
     visit_result?;
+    #[cfg(target_arch = "wasm32")]
+    if processing_error.is_none()
+        && let Some(progress) = latest_imu
+        && progress.sample_count != last_imu_event_count
+    {
+        crate::browser::emit_imu_progress(progress)?;
+    }
     if processing_error.is_none() {
         for completion in remaining {
             collect_detection(
@@ -805,6 +1405,7 @@ pub fn load_and_detect(
                 &mut image_sizes,
                 &mut rate,
                 workers,
+                latest_imu,
                 event,
             )?;
         }
@@ -903,6 +1504,7 @@ pub fn load_and_detect(
             )
         })
         .collect();
+    rate.performance.total_ms = pipeline_started.elapsed().as_secs_f64() * 1000.0;
     let summary = InputSummary {
         schema_version: 2,
         source_type: "rosbag",
@@ -915,6 +1517,7 @@ pub fn load_and_detect(
         imu_sample_count: imu_samples.as_ref().map_or(0, Vec::len),
         imu_first_timestamp_ns: imu_bounds.0,
         imu_last_timestamp_ns: imu_bounds.1,
+        performance: rate.performance,
     };
     let detection_summary = stats.summary(input_view_count, usable_view_count);
     Ok((
@@ -1308,6 +1911,85 @@ mod tests {
         frames.iter().map(|frame| frame.camera_index).collect()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn detection_settings() -> RunSettings {
+        let camera_0 = timing_camera(CameraTimestampReference::ExposureMidpoint);
+        let mut camera_1 = camera_0.clone();
+        camera_1.id = "cam1".to_owned();
+        camera_1.topic = "/cam1/image".to_owned();
+        RunSettings {
+            source: BagSourceConfig {
+                path: std::path::PathBuf::from("recording.bag"),
+                format: crate::config::BagFormatConfig::Ros1V2,
+                imu_topic: None,
+                synchronization: crate::config::SynchronizationConfig::default(),
+            },
+            cameras: vec![camera_0, camera_1],
+            target: crate::config::TargetConfig::default(),
+            detector: crate::config::DetectorConfig::default(),
+            calibration: CalibrationConfig::SingleCamera {
+                camera: "cam0".to_owned(),
+                initial_intrinsics: crate::config::InitialIntrinsicsConfig::default(),
+            },
+            solver: crate::config::SolverConfig::default(),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn detection_pool_preserves_independent_camera_task_identity() {
+        let settings = detection_settings();
+        let detector = FrameDetector::new(&settings);
+        let mut pool = DetectionPool::new(&detector);
+        let expected = [
+            (0_usize, 100_i64, 0_u64, 32_u32),
+            (1, 250, 1, 33),
+            (0, 300, 2, 34),
+            (0, 700, 3, 35),
+            (1, 900, 4, 36),
+        ];
+        for &(camera_index, timestamp_ns, ordinal, width) in &expected {
+            pool.submit(DetectionTask {
+                camera_index,
+                timestamp_ns,
+                ordinal,
+                context: format!("camera {camera_index} frame {ordinal}"),
+                image: DetectionImage::Gray8 {
+                    width,
+                    height: 24,
+                    pixels: vec![255; width as usize * 24],
+                },
+                preview_requested: false,
+            })
+            .unwrap();
+        }
+
+        let mut actual = pool
+            .finish()
+            .unwrap()
+            .into_iter()
+            .map(|completion| {
+                let size = completion.result.unwrap().0;
+                (
+                    completion.camera_index,
+                    completion.timestamp_ns,
+                    completion.ordinal,
+                    size.width,
+                )
+            })
+            .collect::<Vec<_>>();
+        actual.sort_by_key(|entry| entry.2);
+        assert_eq!(actual, expected);
+        assert_eq!(
+            actual.iter().filter(|entry| entry.0 == 0).count(),
+            3
+        );
+        assert_eq!(
+            actual.iter().filter(|entry| entry.0 == 1).count(),
+            2
+        );
+    }
+
     #[test]
     fn forwards_every_detected_view_without_solver_side_thinning() {
         let groups = (0..100)
@@ -1407,6 +2089,178 @@ mod tests {
         ];
         let groups = synchronized_views(&frames, 0, 5, true).unwrap();
         assert_eq!(camera_indices(&groups[0].1), vec![0]);
+    }
+
+    fn native_u16_bytes(values: &[u16]) -> Vec<u8> {
+        values.iter().flat_map(|value| value.to_ne_bytes()).collect()
+    }
+
+    fn native_f32_bytes(values: &[f32]) -> Vec<u8> {
+        values.iter().flat_map(|value| value.to_ne_bytes()).collect()
+    }
+
+    fn assert_gray_matches_image(
+        color: image::ColorType,
+        decoded: &[u8],
+        image: image::DynamicImage,
+    ) {
+        let expected = image.into_luma8().into_raw();
+        let mut actual = Vec::new();
+        decoded_pixels_to_gray(color, decoded, &mut actual).unwrap();
+        assert_eq!(actual, expected, "{color:?} grayscale differs");
+    }
+
+    #[test]
+    fn decoded_grayscale_is_bitexact_with_image_for_every_color_type() {
+        let l8 = vec![0, 1, 127, 128, 254, 255];
+        assert_gray_matches_image(
+            image::ColorType::L8,
+            &l8,
+            image::DynamicImage::ImageLuma8(image::GrayImage::from_raw(6, 1, l8.clone()).unwrap()),
+        );
+
+        let la8 = vec![0, 255, 1, 0, 127, 31, 128, 17, 254, 3, 255, 1];
+        assert_gray_matches_image(
+            image::ColorType::La8,
+            &la8,
+            image::DynamicImage::ImageLumaA8(
+                image::GrayAlphaImage::from_raw(6, 1, la8.clone()).unwrap(),
+            ),
+        );
+
+        let rgb8 = vec![
+            0, 0, 0, 255, 255, 255, 255, 0, 0, 0, 255, 0, 0, 0, 255, 1, 1, 1,
+            17, 83, 201, 254, 127, 3,
+        ];
+        assert_gray_matches_image(
+            image::ColorType::Rgb8,
+            &rgb8,
+            image::DynamicImage::ImageRgb8(image::RgbImage::from_raw(8, 1, rgb8.clone()).unwrap()),
+        );
+
+        let rgba8 = rgb8
+            .chunks_exact(3)
+            .enumerate()
+            .flat_map(|(index, rgb)| [rgb[0], rgb[1], rgb[2], index as u8 * 31])
+            .collect::<Vec<_>>();
+        assert_gray_matches_image(
+            image::ColorType::Rgba8,
+            &rgba8,
+            image::DynamicImage::ImageRgba8(
+                image::RgbaImage::from_raw(8, 1, rgba8.clone()).unwrap(),
+            ),
+        );
+
+        let l16 = vec![0, 1, 128, 32_767, 32_768, 65_534, 65_535];
+        assert_gray_matches_image(
+            image::ColorType::L16,
+            &native_u16_bytes(&l16),
+            image::DynamicImage::ImageLuma16(
+                image::ImageBuffer::<image::Luma<u16>, _>::from_raw(7, 1, l16.clone()).unwrap(),
+            ),
+        );
+
+        let la16 = l16
+            .iter()
+            .enumerate()
+            .flat_map(|(index, &luma)| [luma, u16::MAX - index as u16])
+            .collect::<Vec<_>>();
+        assert_gray_matches_image(
+            image::ColorType::La16,
+            &native_u16_bytes(&la16),
+            image::DynamicImage::ImageLumaA16(
+                image::ImageBuffer::<image::LumaA<u16>, _>::from_raw(7, 1, la16.clone()).unwrap(),
+            ),
+        );
+
+        let rgb16 = vec![
+            0, 0, 0, 65_535, 65_535, 65_535, 65_535, 0, 0, 0, 65_535, 0, 0, 0, 65_535,
+            1, 257, 65_534, 32_767, 32_768, 11_111,
+        ];
+        assert_gray_matches_image(
+            image::ColorType::Rgb16,
+            &native_u16_bytes(&rgb16),
+            image::DynamicImage::ImageRgb16(
+                image::ImageBuffer::<image::Rgb<u16>, _>::from_raw(7, 1, rgb16.clone()).unwrap(),
+            ),
+        );
+
+        let rgba16 = rgb16
+            .chunks_exact(3)
+            .enumerate()
+            .flat_map(|(index, rgb)| [rgb[0], rgb[1], rgb[2], index as u16 * 5_000])
+            .collect::<Vec<_>>();
+        assert_gray_matches_image(
+            image::ColorType::Rgba16,
+            &native_u16_bytes(&rgba16),
+            image::DynamicImage::ImageRgba16(
+                image::ImageBuffer::<image::Rgba<u16>, _>::from_raw(7, 1, rgba16.clone()).unwrap(),
+            ),
+        );
+
+        let rgb32 = vec![
+            0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.125, 0.5, 0.875,
+        ];
+        assert_gray_matches_image(
+            image::ColorType::Rgb32F,
+            &native_f32_bytes(&rgb32),
+            image::DynamicImage::ImageRgb32F(
+                image::Rgb32FImage::from_raw(4, 1, rgb32.clone()).unwrap(),
+            ),
+        );
+
+        let rgba32 = rgb32
+            .chunks_exact(3)
+            .enumerate()
+            .flat_map(|(index, rgb)| [rgb[0], rgb[1], rgb[2], index as f32 / 3.0])
+            .collect::<Vec<_>>();
+        assert_gray_matches_image(
+            image::ColorType::Rgba32F,
+            &native_f32_bytes(&rgba32),
+            image::DynamicImage::ImageRgba32F(
+                image::Rgba32FImage::from_raw(4, 1, rgba32).unwrap(),
+            ),
+        );
+    }
+
+    #[test]
+    fn l8_decoder_uses_decoded_buffer_without_gray_copy() {
+        let encoded = b"P5\n3 1\n255\n\x00\x80\xff";
+        let expected = image::load_from_memory(encoded).unwrap().into_luma8();
+        let mut buffers = DetectionBuffers::default();
+        {
+            let decoded = decode_compressed_gray(encoded, &mut buffers).unwrap();
+            assert_eq!((decoded.width, decoded.height), (3, 1));
+            assert_eq!(decoded.pixels, expected.as_raw());
+        }
+        assert!(buffers.gray.is_empty());
+    }
+
+    #[test]
+    fn input_buffer_cache_reuses_storage_and_stays_bounded() {
+        let cache = InputBufferCache::new(2);
+        let mut first = cache.take(64);
+        first.extend_from_slice(&[1, 2, 3]);
+        let allocation = first.as_ptr();
+        cache.recycle(first);
+
+        let reused = cache.take(32);
+        assert_eq!(reused.as_ptr(), allocation);
+        cache.recycle(reused);
+        cache.recycle(Vec::with_capacity(16));
+        cache.recycle(Vec::with_capacity(8));
+        assert_eq!(cache.buffers.borrow().len(), 2);
+    }
+
+    #[test]
+    fn preview_sampling_is_time_bounded_per_camera() {
+        let mut sampler = PreviewSampler::new(2);
+        assert!(sampler.should_sample(0, Duration::ZERO));
+        assert!(!sampler.should_sample(0, Duration::from_millis(249)));
+        assert!(sampler.should_sample(1, Duration::from_millis(249)));
+        assert!(sampler.should_sample(0, Duration::from_millis(250)));
+        assert!(!sampler.should_sample(1, Duration::from_millis(498)));
+        assert!(sampler.should_sample(1, Duration::from_millis(499)));
     }
 
     #[test]

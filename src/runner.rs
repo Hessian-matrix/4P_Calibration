@@ -1,8 +1,7 @@
 use std::cell::RefCell;
-use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
-use std::time::{Duration, Instant};
+use web_time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
 use ccl_calib::camera::continuous_time::{
@@ -38,8 +37,10 @@ use crate::detection::{DetectedDataset, DetectedView};
 use crate::export::{
     AcceptanceStatus, CalibrationOutput, CameraOutput, CameraTimeOffsetOutput,
     ImuAxisCalibrationOutput, InertialOutput, NamedPose, PoseOutput, RESULT_SCHEMA_VERSION,
-    load_result, publish,
+    publish,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use crate::export::load_result;
 use crate::input;
 use crate::run_record::RunContext;
 use crate::trajectory::Trajectory;
@@ -204,20 +205,22 @@ pub fn execute(
     emit(Event::Stage("scan_detect"));
     let started = Instant::now();
     let mut progress_writer = BufWriter::new(
-        File::create(run.root().join("detection_progress.jsonl"))
-            .context("create detection_progress.jsonl")?,
+        run.create_writer(Path::new("detection_progress.jsonl"))?,
     );
     let mut progress_write_error = None;
     let mut last_flush = Instant::now();
     let mut announced_workers = false;
     let detection_result = {
-        let mut detection_event = |progress: input::DetectionProgress| {
+        let mut detection_event = |mut progress: input::DetectionProgress| {
             if !announced_workers {
                 let message = format!("detection workers={}", progress.workers);
                 let _ = run.log("INFO", &message);
                 emit(Event::Message(message));
                 announced_workers = true;
             }
+            // Preview pixels are live browser telemetry, not persistent numeric diagnostics.
+            // Move them aside while writing instead of cloning the bounded image buffer.
+            let preview = progress.preview.take();
             if progress_write_error.is_none() {
                 let write_result = (|| -> Result<()> {
                     serde_json::to_writer(&mut progress_writer, &progress)?;
@@ -228,6 +231,7 @@ pub fn execute(
                     progress_write_error = Some(error);
                 }
             }
+            progress.preview = preview;
             if last_flush.elapsed() >= Duration::from_millis(250) {
                 if progress_write_error.is_none()
                     && let Err(error) = progress_writer.flush()
@@ -1653,7 +1657,12 @@ fn initial_cameras(
     let prior = initial
         .path
         .as_ref()
-        .map(|path| load_result(path))
+        .map(|path| {
+            #[cfg(not(target_arch = "wasm32"))]
+            { load_result(path) }
+            #[cfg(target_arch = "wasm32")]
+            { crate::export::load_result_bytes(&crate::browser::read_authorized_file(path)?) }
+        })
         .transpose()?;
     indices
         .iter()

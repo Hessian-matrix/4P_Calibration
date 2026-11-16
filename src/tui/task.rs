@@ -1199,6 +1199,10 @@ mod tests {
             frames_per_second: 10.0,
             average_frames_per_second: 10.0,
             workers: 4,
+            decode_grayscale_worker_ms: 0.0,
+            detection_worker_ms: 0.0,
+            preview: None,
+            latest_imu: None,
         };
         let progress = [
             sample("cam1", 3_000_000_000, 12),
