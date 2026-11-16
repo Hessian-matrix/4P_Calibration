@@ -1,4 +1,4 @@
-export const ISOLATION_WORKER_VERSION = 'fourp-coi-v1';
+export const ISOLATION_WORKER_VERSION = 'fourp-coi-v2';
 
 export class IsolationBootstrapError extends Error {
   constructor(code, message, details = {}) {
@@ -89,9 +89,9 @@ function reloadMarker(key) {
 }
 
 /**
- * Establishes optional cross-origin isolation before engine/controller setup.
- * It resolves only when setup may continue, rejects on a permanent failure, or
- * remains pending after scheduling the one allowed reload for this worker version.
+ * Establishes cross-origin isolation and the engine verification boundary before
+ * engine/controller setup. It resolves only when this worker controls the page,
+ * rejects on a permanent failure, or remains pending after its one allowed reload.
  */
 export async function bootstrapCrossOriginIsolation({
   enabled = true,

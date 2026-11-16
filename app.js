@@ -5,7 +5,7 @@ import { ConfigurationForms } from './configuration-forms.js';
 import { ResultsView } from './results-view.js';
 import { FrameHistory } from './frame-history.js';
 import { ConvergenceView } from './convergence-view.js';
-import { StageTiming } from './stage-timing.js';
+import { StageTiming, RunStatus } from './stage-timing.js';
 
 const $ = (id) => document.getElementById(id);
 const controller = new TaskController();
@@ -17,9 +17,12 @@ const stageTiming = new StageTiming($('stage-timing'));
 let source = null, inspectionId = null, draft = null, preflight = null, runId = null;
 let configDirty = true, settingCanonical = false, busy = false, bindingGeneration = 0;
 let profilePromise = null, profileTimer = null;
+let preparingEnvironment = false, environmentReady = false;
+const loadIntentKey = `fourp:load-intent:${new URL('./', import.meta.url).pathname}`;
 const pretty = (value) => JSON.stringify(value, null, 2);
 const profileNames = { 'cpu-single': '兼容模式', 'cpu-rayon': '多核模式' };
 const stageNames = { starting: '正在准备', scan_detect: '读取图像并检测标定板', solve: '计算标定参数', export: '整理结果文件', completed: '标定完成', cancelled: '已停止', failed: '标定失败', cancelling: '正在停止' };
+const runStatus = new RunStatus($('run-stage'), stageNames);
 const finite = (value) => value != null && value !== '' && Number.isFinite(Number(value));
 const displayNumber = (value, digits = 1) => finite(value) ? Number(value).toFixed(digits) : '—';
 const formatBytes = (value) => {
@@ -90,35 +93,65 @@ controller.addEventListener('init', ({ detail }) => {
   setProgress($('boot-progress'), received ?? 0, total, ready);
   $('boot-bytes').textContent = received != null ? `${formatBytes(received)}${total == null ? ' 已下载' : ` / ${formatBytes(total)}`}` : (ready ? '下载与编译完成' : '编译阶段不提供虚构百分比');
   $('retry-init').hidden = !failed;
+  $('load-engine').hidden = true;
   $('boot-status').setAttribute('role', failed ? 'alert' : 'status');
   $('engine-badge').textContent = ready ? `${profileNames[detail.capabilities.profile]} · 已就绪` : failed ? '准备失败' : '正在准备';
   $('engine-badge').className = `badge ${ready ? 'ok' : failed ? 'error' : ''}`;
   $('boot').setAttribute('aria-busy', String(!ready && !failed));
-  for (const id of ['source-files', 'source-directory', 'choose-source', 'validate-config', 'start-run']) $(id).disabled = !ready;
+  for (const id of ['source-files', 'source-directory', 'choose-source', 'validate-config', 'preflight-button', 'start-run', 'import-config-file', 'apply-config-text']) $(id).disabled = !ready;
   $('file-zone').setAttribute('aria-disabled', String(!ready));
   updateProfileControls();
-  if (ready) { $('version').textContent = detail.version.split(';')[0]; if (!source) milestone('source'); }
+  if (ready) {
+    $('version').textContent = detail.version.split(';')[0];
+    const manifest = controller.resources.manifest;
+    $('build-identity').textContent = `版本 ${manifest.releaseId} · ${manifest.executionProfile} · SHA-256 构建标识 ${manifest.buildId}`;
+    if (!source) milestone('source');
+  }
 });
 async function initializeApplication() {
+  if (preparingEnvironment) return;
+  preparingEnvironment = true;
+  $('load-engine').hidden = true;
+  $('retry-init').hidden = true;
+  $('boot').setAttribute('aria-busy', 'true');
+  $('engine-badge').textContent = '正在准备';
+  updateProfileControls();
   try {
-    $('boot-status').textContent = '正在准备浏览器运行环境…';
-    await bootstrapCrossOriginIsolation({ enabled: !crossOriginIsolated });
+    // Resume only the explicit request across the isolation worker's bounded reload.
+    sessionStorage.setItem(loadIntentKey, JSON.stringify({ profile: $('profile').value, workers: $('worker-count').value, expires: Date.now() + 60_000 }));
+    $('boot-status').textContent = '正在准备资源校验与跨源隔离；首次使用可能刷新一次…';
+    await bootstrapCrossOriginIsolation({ enabled: true });
+    sessionStorage.removeItem(loadIntentKey);
+    environmentReady = true;
     await applyProfile();
-  } catch (error) { controller.emit('init', { stage: 'failed', message: error.message }); }
+  } catch (error) {
+    try { sessionStorage.removeItem(loadIntentKey); } catch { /* report the original storage/environment failure */ }
+    controller.emit('init', { stage: 'failed', message: error.message });
+  } finally { preparingEnvironment = false; updateProfileControls(); }
 }
+$('load-engine').addEventListener('click', initializeApplication);
 $('retry-init').addEventListener('click', initializeApplication);
 const availableWorkers = Number(navigator.hardwareConcurrency);
 // Detection keeps full-resolution buffers per worker; cap the automatic choice, not manual tuning.
 $('worker-count').value = String(Number.isInteger(availableWorkers) && availableWorkers > 0 ? Math.min(8, availableWorkers) : 4);
-void initializeApplication();
+try {
+  const intent = JSON.parse(sessionStorage.getItem(loadIntentKey) || 'null');
+  sessionStorage.removeItem(loadIntentKey);
+  if (intent?.expires > Date.now() && ['cpu-single', 'cpu-rayon'].includes(intent.profile) && Number.isInteger(Number(intent.workers)) && Number(intent.workers) >= 1 && Number(intent.workers) <= 32) {
+    $('profile').value = intent.profile;
+    $('worker-count').value = intent.workers;
+    void initializeApplication();
+  }
+} catch { /* no resumable user request; explicit load reports unavailable storage */ }
 
 function updateProfileControls() {
-  const locked = Boolean(profilePromise || controller.activeRunId || [...controller.inspections.values()].some(item => item.status === 'running'));
+  const locked = Boolean(preparingEnvironment || profilePromise || controller.activeRunId || [...controller.inspections.values()].some(item => item.status === 'running'));
   $('profile').disabled = locked;
   $('worker-count').disabled = locked;
   $('worker-count').closest('label').hidden = $('profile').value !== 'cpu-rayon';
 }
 async function applyProfile() {
+  if (!environmentReady) throw new Error('请先点击“加载本地计算引擎”。');
   clearTimeout(profileTimer);
   if (profilePromise) await profilePromise;
   const profile = $('profile').value, workers = profile === 'cpu-rayon' ? Number($('worker-count').value) : 1;
@@ -141,6 +174,7 @@ async function applyProfile() {
 function scheduleProfile() {
   preflight = null;
   clearTimeout(profileTimer);
+  if (!environmentReady) { $('profile-status').textContent = '计算方式将在点击“加载本地计算引擎”后应用。'; updateProfileControls(); return; }
   updateProfileControls();
   if ($('profile').value === 'cpu-rayon' && !$('worker-count').checkValidity()) {
     $('profile-status').textContent = '请输入 1–32 的整数线程数'; return;
@@ -305,6 +339,7 @@ async function checkSettings() {
 }
 $('preflight-button').addEventListener('click', () => void checkSettings());
 function resetTelemetry() {
+  runStatus.reset();
   frameHistory.reset(forms.getConfig().target.id_rows_front_view_left_to_right.flat().length);
   convergenceView.reset();
   stageTiming.start(forms.getConfig().cameras, controller.inspections.get(inspectionId)?.result?.topics ?? []);
@@ -410,15 +445,13 @@ controller.addEventListener('event', ({ detail }) => {
 function renderRunEvent(detail, latest = true) {
   convergenceView.event(detail);
   const payload = detail.payload || {}, workerCount = payload.workers ?? controller.runs.get(runId)?.workerCount ?? controller.capabilities?.threads;
-  let progress = workerCount == null ? '' : ` · ${workerCount} 个工作线程`;
   if (detail.kind === 'detectionProgress' && latest) {
     $('metric-fps').textContent = displayNumber(payload.frames_per_second); $('metric-average-fps').textContent = displayNumber(payload.average_frames_per_second); $('metric-workers').textContent = payload.workers == null ? String(workerCount ?? '—') : String(payload.workers);
     if (payload.latest_imu) renderImu(payload.latest_imu);
-    progress += `${payload.frames_processed == null ? '' : ` · 已处理 ${payload.frames_processed} 帧`}${finite(payload.average_frames_per_second) ? ` · 平均 ${Number(payload.average_frames_per_second).toFixed(1)} FPS` : ''}`;
   } else if (detail.kind === 'imuProgress') renderImu(payload);
   else if (detail.kind === 'solveProgress') { $('metric-iteration').textContent = `${payload.iteration ?? '—'} / ${payload.max_iterations ?? '—'}`; $('solve-phase').textContent = 'LM 求解迭代'; $('solve-work').textContent = `iter ${payload.iteration ?? '—'} / ${payload.max_iterations ?? '—'} · cost ${finite(payload.cost) ? Number(payload.cost).toExponential(4) : '—'}`; }
   else if (detail.kind === 'solveActivity') { $('solve-phase').textContent = payload.phase == null ? '求解活动' : String(payload.phase); $('solve-work').textContent = payload.completed != null && payload.total != null ? `${payload.completed} / ${payload.total}${payload.iteration == null ? '' : ` · iter ${payload.iteration}`}` : payload.iteration == null ? '工作量不可计数' : `iter ${payload.iteration} · 工作量不可计数`; }
-  if (latest) $('run-stage').textContent = `${stageNames[detail.stage] || detail.stage || '正在计算'} · ${(detail.elapsedMs / 1000).toFixed(1)} 秒${progress}`;
+  if (latest) runStatus.event(detail, workerCount);
   const { preview, ...numericPayload } = payload;
   if (preview) numericPayload.preview = { width: preview.width, height: preview.height, corners: preview.corners?.length ?? 0, pixels: '图像仅在预览显示，不转储像素' };
   const li = document.createElement('li'), entry = document.createElement('details'), summary = document.createElement('summary');

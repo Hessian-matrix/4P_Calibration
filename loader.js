@@ -1,3 +1,6 @@
+const VERIFIED_BUILD_HEADER = 'X-FourP-Verified-Build';
+const VERIFIED_ASSET_HEADER = 'X-FourP-Verified-SHA256';
+
 
 function fail(message, details) {
   const error = new Error(message);
@@ -14,8 +17,10 @@ async function fetchResource(resource, manifestUrl, signal, onChunk) {
   const url = new URL(resource.url, manifestUrl);
   const manifestDirectory = new URL('.', manifestUrl);
   if (url.origin !== location.origin || !url.pathname.startsWith(manifestDirectory.pathname) || url.search || url.hash || resource.url.includes('\\')) fail('引擎 manifest 包含越界或非静态资源', { url: url.href });
-  const response = await fetch(url, { signal, cache: 'no-cache' });
-  if (!response.ok || !response.body) fail(`无法下载 ${resource.url}`, { status: response.status });
+  const response = await fetch(url, { signal, cache: 'no-store', redirect: 'error' });
+  if (!response.ok || response.redirected || !response.body) fail(`无法下载 ${resource.url}`, { status: response.status });
+  const verifiedHash = response.headers.get(VERIFIED_ASSET_HEADER);
+  if (verifiedHash !== resource.sha256.toLowerCase()) fail(`资源未经过隔离 Worker 最终校验: ${resource.url}`, { expected: resource.sha256, actual: verifiedHash });
   const headerLength = response.headers.get('Content-Length');
   const encoding = response.headers.get('Content-Encoding');
   const trustedLength = (!encoding || encoding === 'identity') && headerLength && /^\d+$/.test(headerLength) && Number(headerLength) === Number(resource.bytes) ? Number(headerLength) : null;
@@ -41,12 +46,15 @@ async function fetchResource(resource, manifestUrl, signal, onChunk) {
 }
 
 export async function loadEngineResources({ profile = 'cpu-single', signal, onState }) {
+  if (!navigator.serviceWorker?.controller) fail('引擎加载要求隔离 Worker 控制当前页面');
   const manifestUrl = new URL(profile === 'cpu-rayon' ? './engine/manifest-threads.json' : './engine/manifest.json', import.meta.url);
   onState({ stage: 'manifest', message: '获取发布 manifest…', determinate: false });
-  const response = await fetch(manifestUrl, { signal, cache: 'no-cache' });
-  if (!response.ok) fail('无法获取引擎 manifest', { status: response.status, url: manifestUrl.href });
+  const response = await fetch(manifestUrl, { signal, cache: 'no-store', redirect: 'error' });
+  if (!response.ok || response.redirected) fail('无法获取引擎 manifest', { status: response.status, url: manifestUrl.href });
+  const verifiedBuild = response.headers.get(VERIFIED_BUILD_HEADER);
   const manifest = await response.json();
   if (!manifest || manifest.manifestVersion !== 1 || manifest.engineApi !== 'fourp.engine.v1' || typeof manifest.releaseId !== 'string' || typeof manifest.buildId !== 'string' || !Array.isArray(manifest.resources)) fail('引擎 manifest 格式或 API 版本无效');
+  if (verifiedBuild !== manifest.buildId) fail('引擎 manifest 未经过隔离 Worker 最终校验', { expected: manifest.buildId, actual: verifiedBuild });
   if (manifest.executionProfile !== profile) fail('manifest 执行档与用户选择不一致');
   const glue = manifest.resources.find((item) => item.role === 'glue' && item.url.split('/').at(-1) === 'four_p_calibration.js');
   const wasm = manifest.resources.find((item) => item.role === 'wasm' && item.url.split('/').at(-1) === 'four_p_calibration_bg.wasm');

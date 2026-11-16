@@ -75,3 +75,21 @@ export class StageTiming {
     this.remaining.textContent = `约 ${duration((this.total - done) / this.rate)}`;
   }
 }
+
+// Ordinary log/IMU events must not erase the last detection summary.
+export class RunStatus {
+  constructor(root, labels) { this.root = root; this.labels = labels; this.reset(); }
+
+  reset() { this.stage = null; this.detection = ''; }
+
+  event(detail, workers) {
+    const stage = detail.stage || this.stage;
+    if (stage !== this.stage) { this.stage = stage; this.detection = ''; }
+    if (detail.kind === 'detectionProgress') {
+      const payload = detail.payload;
+      this.detection = `${payload.frames_processed == null ? '' : ` · 已处理 ${payload.frames_processed} 帧`}${Number.isFinite(payload.average_frames_per_second) ? ` · 平均 ${payload.average_frames_per_second.toFixed(1)} FPS` : ''}`;
+    }
+    const text = `${this.labels[stage] || stage || '正在计算'} · ${(detail.elapsedMs / 1000).toFixed(1)} 秒${workers == null ? '' : ` · ${workers} 个工作线程`}${this.detection}`;
+    if (this.root.textContent !== text) this.root.textContent = text;
+  }
+}

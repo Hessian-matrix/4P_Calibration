@@ -39,7 +39,7 @@ function makeCubeLabel(THREE, text, color) {
   return new THREE.MeshBasicMaterial({ map: texture });
 }
 
-function installViewCube(THREE, viewport, camera, controls, renderMain) {
+function installViewCube(THREE, viewport, getCamera, controls, renderMain) {
   const overlay = setStyles(document.createElement('div'), { position: 'absolute', top: '8px', right: '8px', width: '112px', height: '112px', zIndex: '2', cursor: 'pointer' });
   overlay.setAttribute('aria-label', '坐标轴视角方块，点击面可对齐视角');
   const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true }); renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2)); renderer.setClearColor(0, 0); setStyles(renderer.domElement, { width: '100%', height: '100%', display: 'block' }); overlay.append(renderer.domElement); viewport.append(overlay);
@@ -52,11 +52,12 @@ function installViewCube(THREE, viewport, camera, controls, renderMain) {
   cubeScene.add(cube);
   const faceDirections = [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, -1, 0], [0, 1, 0]];
   const raycaster = new THREE.Raycaster(); const pointer = new THREE.Vector2(); let animation = 0;
-  const draw = () => { cube.quaternion.copy(camera.quaternion).invert(); renderer.render(cubeScene, cubeCamera); };
+  const draw = () => { cube.quaternion.copy(getCamera().quaternion).invert(); renderer.render(cubeScene, cubeCamera); };
   const cancel = () => { cancelAnimationFrame(animation); animation = 0; };
   const resize = () => { const size = Math.max(1, Math.min(112, overlay.clientWidth)); renderer.setSize(size, size, false); draw(); };
   const align = (direction) => {
     cancel();
+    const camera = getCamera();
     const target = controls.target.clone();
     const radius = camera.position.distanceTo(target);
     const start = camera.quaternion.clone();
@@ -177,11 +178,22 @@ export function extrinsicsView(result) {
   setStyles(help, { margin: '0', color: 'var(--muted, #587061)' });
   copy.append(description, help);
 
+  const projectionLabel = document.createElement('label');
+  projectionLabel.textContent = '投影方式 ';
+  const projection = document.createElement('select');
+  projection.setAttribute('aria-label', '外参投影方式');
+  for (const [value, text] of [['perspective', '透视'], ['orthographic', '平行（正交）']]) {
+    const option = document.createElement('option'); option.value = value; option.textContent = text; projection.append(option);
+  }
+  projection.disabled = true;
+  projectionLabel.append(projection);
   const reset = document.createElement('button');
   reset.type = 'button';
   reset.textContent = '重置视角';
   reset.disabled = true;
-  header.append(copy, reset);
+  const actions = setStyles(document.createElement('div'), { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '10px' });
+  actions.append(projectionLabel, reset);
+  header.append(copy, actions);
 
   const viewport = setStyles(document.createElement('div'), {
     position: 'relative', width: '100%', height: 'clamp(280px, 45vw, 380px)', overflow: 'hidden',
@@ -209,6 +221,7 @@ export function extrinsicsView(result) {
   const showError = (message) => {
     if (disposed) return;
     reset.disabled = true;
+    projection.disabled = true;
     status.textContent = message;
     status.setAttribute('role', 'alert');
     setStyles(status, { color: '#8b2f24', background: '#fff8f6' });
@@ -255,7 +268,9 @@ export function extrinsicsView(result) {
     setStyles(renderer.domElement, { display: 'block', width: '100%', height: '100%', outline: 'none' });
 
     const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(42, 1, 0.001, 1000);
+    const perspectiveCamera = new THREE.PerspectiveCamera(42, 1, 0.001, 1000);
+    const orthographicCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.001, 1000);
+    let camera = perspectiveCamera;
     const rig = new THREE.Group(); rig.rotation.x = -Math.PI / 2; scene.add(rig);
     const positions = [new THREE.Vector3(0, 0, 0), ...poses.map((pose) => dataVector(THREE, pose.position))];
     const bounds = new THREE.Box3().setFromPoints(positions);
@@ -287,6 +302,11 @@ export function extrinsicsView(result) {
     camera.far = Math.max(distance + framingRadius * 20, camera.near * 1000);
     camera.updateProjectionMatrix();
     camera.position.copy(center).add(new THREE.Vector3(1.2, 0.85, 1.35).normalize().multiplyScalar(distance));
+    orthographicCamera.near = camera.near;
+    orthographicCamera.far = camera.far;
+    const perspectiveSlope = Math.tan(THREE.MathUtils.degToRad(perspectiveCamera.fov / 2));
+    const initialHalfHeight = distance * perspectiveSlope;
+    let orthographicHalfHeight = initialHalfHeight;
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = false;
@@ -302,23 +322,61 @@ export function extrinsicsView(result) {
     controls.update();
     controls.saveState();
 
+    const updateProjection = () => {
+      const aspect = Math.max(1, viewport.clientWidth || 760) / Math.max(1, viewport.clientHeight || 340);
+      perspectiveCamera.aspect = aspect;
+      perspectiveCamera.updateProjectionMatrix();
+      orthographicCamera.left = -orthographicHalfHeight * aspect;
+      orthographicCamera.right = orthographicHalfHeight * aspect;
+      orthographicCamera.top = orthographicHalfHeight;
+      orthographicCamera.bottom = -orthographicHalfHeight;
+      orthographicCamera.updateProjectionMatrix();
+      controls.minZoom = orthographicHalfHeight / (controls.maxDistance * perspectiveSlope);
+      controls.maxZoom = orthographicHalfHeight / (controls.minDistance * perspectiveSlope);
+    };
+
     const render = () => renderer.render(scene, camera);
     controls.addEventListener('change', render);
     let viewCube;
     const resetView = () => {
       viewCube?.cancel();
+      orthographicHalfHeight = initialHalfHeight;
+      updateProjection();
       controls.reset();
       render();
     };
     reset.addEventListener('click', resetView);
+
+    const switchProjection = () => {
+      const next = projection.value === 'orthographic' ? orthographicCamera : perspectiveCamera;
+      if (next === camera) return;
+      viewCube?.cancel();
+      const offset = camera.position.clone().sub(controls.target);
+      // Match the visible height at the orbit target, not an arbitrary zoom default.
+      const halfHeight = camera.isPerspectiveCamera
+        ? offset.length() * perspectiveSlope / camera.zoom
+        : orthographicHalfHeight / camera.zoom;
+      next.zoom = 1;
+      next.position.copy(camera.position);
+      next.quaternion.copy(camera.quaternion);
+      next.up.copy(camera.up);
+      if (next.isOrthographicCamera) orthographicHalfHeight = halfHeight;
+      else next.position.copy(controls.target).add(offset.setLength(halfHeight / perspectiveSlope));
+      camera = next;
+      controls.object = camera;
+      updateProjection();
+      controls.update();
+      renderer.domElement.setAttribute('aria-label', `${camera.isOrthographicCamera ? '平行' : '透视'}投影的相机外参三维视图，可旋转、平移和缩放`);
+      render();
+    };
+    projection.addEventListener('change', switchProjection);
 
     const resize = () => {
       if (disposed) return;
       const width = Math.max(1, viewport.clientWidth || 760);
       const height = Math.max(1, viewport.clientHeight || 340);
       renderer.setSize(width, height, false);
-      camera.aspect = width / height;
-      camera.updateProjectionMatrix();
+      updateProjection();
       render();
     };
     let resizeObserver = null;
@@ -334,6 +392,7 @@ export function extrinsicsView(result) {
       resizeObserver?.disconnect();
       if (!resizeObserver) window.removeEventListener('resize', resize);
       reset.removeEventListener('click', resetView);
+      projection.removeEventListener('change', switchProjection);
       controls.removeEventListener('change', render);
       controls.dispose();
       const geometries = new Set();
@@ -357,8 +416,9 @@ export function extrinsicsView(result) {
     };
 
     viewport.replaceChildren(renderer.domElement);
-    viewCube = installViewCube(THREE, viewport, camera, controls, render);
+    viewCube = installViewCube(THREE, viewport, () => camera, controls, render);
     reset.disabled = false;
+    projection.disabled = false;
     resize();
   })().catch((error) => {
     cleanup();

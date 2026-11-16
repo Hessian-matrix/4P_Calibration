@@ -2,6 +2,9 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; connect-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; base-uri 'none'; form-action 'none'; object-src 'none'">
+  <meta name="referrer" content="no-referrer">
+  <meta name="description" content="4P 离线相机与 IMU 标定工作台。用户选择的数据在本机浏览器中处理，不上传标定文件，无需安装程序或扩展。">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>4P 标定工作台</title>
   <link rel="stylesheet" href="./style.css">
@@ -13,15 +16,24 @@
   <nav aria-label="标定流程">
     <a href="#boot" data-section="boot">引擎</a><a href="#source" data-section="source">数据</a><a href="#inspection" data-section="inspection">解析</a><a href="#sensors" data-section="sensors">话题</a><a href="#compute" data-section="compute">配置</a><a href="#run" data-section="run">计算</a><a href="#results" data-section="results">结果</a>
   </nav>
-  <span id="engine-badge" class="badge">正在准备</span>
+  <span id="engine-badge" class="badge">尚未加载</span>
 </header>
 <noscript><p class="alert">请启用 JavaScript 使用本地标定工作台。</p></noscript>
 <main>
-  <section id="boot" class="work-block boot" aria-labelledby="boot-title" aria-busy="true">
+  <section id="boot" class="work-block boot" aria-labelledby="boot-title" aria-busy="false">
     <div class="block-number">01</div><div class="block-content">
-      <div class="section-head"><div><p class="eyebrow">ENGINE INIT</p><h1 id="boot-title">正在准备本地引擎</h1></div><button id="retry-init" hidden>重新准备</button></div>
-      <p id="boot-status" role="status" aria-live="polite">首次打开需要下载计算组件，数据不会上传。</p>
-      <div id="boot-progress" class="progress indeterminate" aria-hidden="true"><span></span></div><p id="boot-bytes" class="mono small"></p>
+      <div class="section-head"><div><p class="eyebrow">LOCAL CALIBRATION</p><h1 id="boot-title">本地相机与 IMU 标定</h1></div><button id="retry-init" hidden>重新准备</button></div>
+      <p class="lead">4P Calibration 在本机浏览器中读取标定数据并计算参数。无需安装程序、浏览器扩展，也无需关闭浏览器安全防护。</p>
+      <ul class="local-use-notice">
+        <li>点击下方按钮后，从本站下载并校验 WebAssembly 计算组件，使用本机 CPU 和工作线程；选择文件后才开始解析，点击“开始标定”才求解。</li>
+        <li>只读取你主动选择的文件或目录，不上传标定文件、图像或结果。结果由你手动下载；刷新或关闭页面会丢失当前计算会话。</li>
+        <li>首次准备可能刷新一次，以启用资源校验与跨源隔离。站点托管方仍会收到正常资源请求和连接信息；“数据不上传”不代表匿名访问。</li>
+      </ul>
+      <p class="project-links"><a href="https://github.com/hessian-matrix/4P_Calibration" target="_blank" rel="noopener noreferrer">项目与源码</a> · <a href="https://github.com/hessian-matrix/4P_Calibration/issues" target="_blank" rel="noopener noreferrer">问题反馈</a> · 反馈时请勿附带未经脱敏的数据或凭据。</p>
+      <p id="build-identity" class="mono small">版本与引擎构建标识将在校验后显示；标识不是第三方安全认证。</p>
+      <button id="load-engine" class="primary" type="button">加载本地计算引擎</button>
+      <p id="boot-status" role="status" aria-live="polite">尚未下载计算引擎。请先阅读上述说明。</p>
+      <div id="boot-progress" class="progress idle" aria-hidden="true"><span></span></div><p id="boot-bytes" class="mono small"></p>
     </div>
   </section>
 
@@ -61,7 +73,7 @@
         <div class="form-grid"><label class="field">计算方式<select id="profile"><option value="cpu-single">兼容模式 · CPU</option><option value="cpu-rayon" selected>多核模式 · CPU</option></select></label><label class="field">CPU 工作线程数<input id="worker-count" type="number" min="1" max="32" step="1" value="4"></label></div><p id="profile-status" class="small" role="status">按浏览器报告的并行度自动选择，默认最多 8 线程以限制图像缓冲内存；可手动调整。运行或解析期间不可修改。</p>
       </div>
       <div id="panel-advanced" class="tab-panel" role="tabpanel" aria-labelledby="tab-advanced" hidden>
-        <p>导入后仍按相同规则检查；通常无需直接编辑配置文本。</p><label>导入已有配置<input id="import-config-file" type="file" accept=".yaml,.yml,.json"></label><div class="button-row"><button id="export-config">导出当前配置</button><span id="config-revision" class="mono small"></span></div><label>配置文本<textarea id="config-editor" rows="12" spellcheck="false"></textarea></label><button id="apply-config-text">应用配置文本</button>
+        <p>导入后仍按相同规则检查；通常无需直接编辑配置文本。</p><label>导入已有配置<input id="import-config-file" type="file" accept=".yaml,.yml,.json" disabled></label><div class="button-row"><button id="export-config">导出当前配置</button><span id="config-revision" class="mono small"></span></div><label>配置文本<textarea id="config-editor" rows="12" spellcheck="false"></textarea></label><button id="apply-config-text" disabled>应用配置文本</button>
       </div>
       <div class="config-footer"><p id="config-status" role="status">使用默认设置或按需调整，开始前会自动检查。</p><button id="validate-config" disabled>检查当前设置</button></div>
     </div>
@@ -69,7 +81,7 @@
 
   <section id="run" class="work-block" aria-labelledby="run-title">
     <div class="block-number">06</div><div class="block-content"><div class="section-head"><div><p class="eyebrow">COMPUTE MONITOR</p><h1 id="run-title">计算监视器</h1></div><span id="run-state" class="badge">尚未开始</span></div>
-      <div id="run-overview" class="summary-line"></div><ul id="preflight" class="checks"><li>开始前检查数据、传感器和标定板设置。</li></ul><div class="button-row"><button id="preflight-button">检查设置</button><button id="start-run" class="primary">开始标定</button><button id="cancel-run" class="danger" hidden>停止标定</button></div>
+      <div id="run-overview" class="summary-line"></div><ul id="preflight" class="checks"><li>开始前检查数据、传感器和标定板设置。</li></ul><div class="button-row"><button id="preflight-button" disabled>检查设置</button><button id="start-run" class="primary" disabled>开始标定</button><button id="cancel-run" class="danger" hidden>停止标定</button></div>
       <div id="compute-activity" class="compute-activity" role="img" aria-label="逐帧 Tag 数，等待检测"><div id="frame-bars"></div></div><p id="frame-bars-label" class="small">一柱一帧 · 右侧最新 · 等待真实检测事件</p><p id="run-stage" role="status" aria-live="polite">开始后显示真实阶段、吞吐和工作线程。</p>
       <div class="telemetry-grid"><div class="metric"><span>实时 FPS</span><strong id="metric-fps">—</strong></div><div class="metric"><span>平均 FPS</span><strong id="metric-average-fps">—</strong></div><div class="metric"><span>工作线程</span><strong id="metric-workers">—</strong></div><div class="metric"><span>求解迭代</span><strong id="metric-iteration">—</strong></div></div>
       <div id="stage-timing" class="telemetry-grid" aria-label="当前阶段耗时与预计剩余"></div>
@@ -85,5 +97,5 @@
     <div class="block-number">07</div><div class="block-content"><p class="eyebrow">RESULTS / EXTRINSICS</p><h1 id="results-title">结果与外参</h1><p id="result-status">完成标定后，这里显示真实误差、参数和产物。</p><div id="result-summary"></div><div id="extrinsics-view"></div><div class="artifact-panel"><h2>保存结果</h2><ul id="artifact-list" class="file-list"><li>尚无结果文件</li></ul></div><details class="advanced"><summary>完整结果参数</summary><pre id="result-output" class="output"></pre></details></div>
   </section>
 </main>
-<footer><span>4P Calibration · <span id="version">正在加载</span></span><span>本地 CPU 计算 · 数据不上传 · 结果需人工验收</span></footer>
+<footer><span>4P Calibration · <span id="version">引擎尚未加载</span></span><span>本地 CPU 计算 · 标定数据不上传 · 结果需人工验收</span></footer>
 </body></html>

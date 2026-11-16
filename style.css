@@ -107,3 +107,10 @@ footer{padding-right:max(20px,env(safe-area-inset-right,0px),calc((100vw - 1160p
   footer{padding-right:max(12px,env(safe-area-inset-right,0px));padding-bottom:max(18px,env(safe-area-inset-bottom,0px));padding-left:max(12px,env(safe-area-inset-left,0px))}
   .work-block{scroll-margin-top:180px}
 }
+
+.local-use-notice{padding-left:1.3rem;font-size:14px;color:var(--muted)}
+.local-use-notice li{margin:.55rem 0}
+.project-links{font-size:13px}.project-links a{color:var(--green);text-underline-offset:3px}
+#build-identity{overflow-wrap:anywhere;max-width:100%}
+#load-engine{margin:8px 0}
+#run-stage{font-variant-numeric:tabular-nums}
