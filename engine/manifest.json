@@ -1,0 +1,21 @@
+{
+  "manifestVersion": 1,
+  "releaseId": "0.1.4",
+  "buildId": "5c8d440bbd5a838538115dc51dbcfccd2fdf62c6be9a610e0801b787e0079c28",
+  "engineApi": "fourp.engine.v1",
+  "executionProfile": "cpu-single",
+  "resources": [
+    {
+      "role": "glue",
+      "url": "5c8d440bbd5a838538115dc51dbcfccd2fdf62c6be9a610e0801b787e0079c28/four_p_calibration.js",
+      "bytes": "15963",
+      "sha256": "55ba58638de14538ed9316666fd9e11155126f1af6ff47b4708a0f2747a5a76c"
+    },
+    {
+      "role": "wasm",
+      "url": "5c8d440bbd5a838538115dc51dbcfccd2fdf62c6be9a610e0801b787e0079c28/four_p_calibration_bg.wasm",
+      "bytes": "3861017",
+      "sha256": "c24285561e76ca3bc0858bd21d752d301b7512cf363f8214c08113c7ac4d7800"
+    }
+  ]
+}
