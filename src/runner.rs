@@ -1,3 +1,5 @@
+mod intrinsic_seed;
+
 use std::cell::RefCell;
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -374,10 +376,15 @@ fn solve_single(
     run: &RunContext,
 ) -> Result<(CalibrationOutput, SolveSummary)> {
     let source_index = camera_index(config, camera_id)?;
-    let cameras = initial_cameras(config, detected, &[source_index], initial)?;
+    let mut cameras = initial_cameras(config, detected, &[source_index], initial)?;
     let observation_groups =
         build_observations(target, &detected.synchronized_views, Some(source_index))?;
     let shared = shared_views(&observation_groups);
+    let mut solver = joint_solver(config);
+    solver.pixel_sigmas = vec![config.cameras[source_index].pixel_sigma];
+    if initial.path.is_none() {
+        cameras[0] = bootstrap_camera(cameras[0], camera_id, &shared, &solver, control)?;
+    }
     let request = CameraRigCalibrationRequest {
         cameras: &cameras,
         views: &shared,
@@ -388,7 +395,7 @@ fn solve_single(
     let result = ccl_calib::camera::rig::calibrate_camera_rig(
         &request,
         RigSolverConfig {
-            solver: joint_solver(config),
+            solver,
             ..RigSolverConfig::default()
         },
         control,
@@ -451,6 +458,7 @@ fn solve_multi(
             &cameras,
             &observations.iter().map(Vec::as_slice),
             control,
+            run,
         )?;
     }
     let shared = shared_views(&observations);
@@ -558,6 +566,7 @@ fn solve_inertial(
             &cameras,
             &synchronized_observations.iter().map(Vec::as_slice),
             control,
+            run,
         )?;
     }
     run.log(
@@ -773,6 +782,7 @@ fn solve_continuous_inertial(
             cameras,
             &exact_views.iter().map(|view| view.observations),
             control,
+            run,
         )?)
     } else {
         None
@@ -1597,11 +1607,37 @@ fn shared_views<'a>(observations: &'a [Vec<CameraObservation<'a>>]) -> Vec<Share
         .collect()
 }
 
+/// Seed intrinsics on a representative set before attempting the difficult per-view PnPs.
+/// Selection is initialization only: the caller always fits the entire original view list.
+fn bootstrap_camera(
+    nominal: CameraParameters,
+    camera_id: &str,
+    views: &[SharedView<'_>],
+    solver: &JointSolverConfig,
+    control: &SolveControl<'_>,
+) -> Result<CameraParameters> {
+    let indices = intrinsic_seed::select(views);
+    if indices.len() == views.len() {
+        return Ok(nominal); // The caller's full solve is already the seed solve.
+    }
+    let seed_views: Vec<_> = indices.iter().map(|&i| views[i].clone()).collect();
+    let result = ccl_calib::camera::rig::calibrate_camera_rig(
+        &CameraRigCalibrationRequest {
+            cameras: &[nominal], views: &seed_views, reference_camera: 0,
+            initialization: RigInitialization::Planar, refine_intrinsics: true,
+        },
+        RigSolverConfig { solver: solver.clone(), ..RigSolverConfig::default() },
+        control,
+    ).with_context(|| format!("{camera_id}: intrinsic bootstrap failed on seed view indices {indices:?} (of {})", views.len()))?;
+    Ok(result.cameras[0])
+}
+
 fn calibrate_automatic_intrinsics<'a>(
     config: &RunSettings,
     cameras: &[CameraParameters],
     observations: &(impl Iterator<Item = &'a [CameraObservation<'a>]> + Clone),
     control: &SolveControl<'_>,
+    run: &RunContext,
 ) -> Result<Vec<CameraParameters>> {
     cameras
         .iter()
@@ -1623,6 +1659,9 @@ fn calibrate_automatic_intrinsics<'a>(
                 .iter()
                 .map(|observations| SharedView { observations })
                 .collect::<Vec<_>>();
+            let mut solver = joint_solver(config);
+            solver.pixel_sigmas = vec![config.cameras[camera_index].pixel_sigma];
+            let initial = bootstrap_camera(initial, &config.cameras[camera_index].id, &views, &solver, control)?;
             let result = ccl_calib::camera::rig::calibrate_camera_rig(
                 &CameraRigCalibrationRequest {
                     cameras: &[initial],
@@ -1632,7 +1671,7 @@ fn calibrate_automatic_intrinsics<'a>(
                     refine_intrinsics: true,
                 },
                 RigSolverConfig {
-                    solver: joint_solver(config),
+                    solver,
                     ..RigSolverConfig::default()
                 },
                 control,
@@ -1643,6 +1682,12 @@ fn calibrate_automatic_intrinsics<'a>(
                     config.cameras[camera_index].id, config.cameras[camera_index].model
                 )
             })?;
+            let summary = &result.camera_errors[0];
+            run.log("INFO", &format!(
+                "automatic intrinsics {}: {} views, {} used / {} rejected points, RMS {:.4} px, P95 {:.4} px, model {:?}",
+                config.cameras[camera_index].id, views.len(), summary.used_points, summary.rejected_points,
+                summary.rms_px, summary.p95_px, result.cameras[0],
+            ))?;
             Ok(result.cameras[0])
         })
         .collect()
